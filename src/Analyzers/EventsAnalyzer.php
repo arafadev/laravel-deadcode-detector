@@ -6,6 +6,7 @@ namespace Arafa\DeadcodeDetector\Analyzers;
 
 use PhpParser\Error;
 use PhpParser\Node;
+use PhpParser\Node\Arg;
 use PhpParser\Node\Expr\Array_;
 use PhpParser\Node\Expr\ClassConstFetch;
 use PhpParser\Node\Expr\FuncCall;
@@ -329,47 +330,51 @@ final class EventDispatchCollector extends NodeVisitorAbstract
             if (in_array($m, ['dispatch', 'dispatchif', 'dispatchunless'], true)) {
                 $this->addClassFx($node->class);
             }
+        }
+
+        return null;
+    }
+
+    public function leaveNode(Node $node): ?int
+    {
+        // Resolve New_::class and ClassConstFetch::class after children (NameResolver runs on enter New_).
+        if ($node instanceof StaticCall && $node->name instanceof Identifier) {
+            $m = strtolower($node->name->name);
             if ($m === 'dispatch' && $this->isEventFacade($node->class)) {
-                foreach ($node->args as $arg) {
-                    $v = $arg->value ?? null;
-                    if ($v instanceof New_) {
-                        $this->addClassFx($v->class);
-                    }
-                    if ($v instanceof ClassConstFetch) {
-                        $this->addClassFx($v->class);
-                    }
-                }
+                $this->collectDispatchArgs($node->args);
             }
 
             return null;
         }
 
         if ($node instanceof MethodCall && $node->name instanceof Identifier && strtolower($node->name->name) === 'dispatch') {
-            foreach ($node->args as $arg) {
-                $v = $arg->value ?? null;
-                if ($v instanceof New_) {
-                    $this->addClassFx($v->class);
-                }
-                if ($v instanceof ClassConstFetch) {
-                    $this->addClassFx($v->class);
-                }
-            }
+            $this->collectDispatchArgs($node->args);
         }
 
         if ($node instanceof FuncCall) {
             $fn = $this->funcName($node);
             if (($fn === 'event' || $fn === 'broadcast') && isset($node->args[0])) {
-                $v = $node->args[0]->value ?? null;
-                if ($v instanceof New_) {
-                    $this->addClassFx($v->class);
-                }
-                if ($v instanceof ClassConstFetch) {
-                    $this->addClassFx($v->class);
-                }
+                $this->collectDispatchArgs([$node->args[0]]);
             }
         }
 
         return null;
+    }
+
+    /**
+     * @param array<int, Arg> $args
+     */
+    private function collectDispatchArgs(array $args): void
+    {
+        foreach ($args as $arg) {
+            $v = $arg->value ?? null;
+            if ($v instanceof New_) {
+                $this->addClassFx($v->class);
+            }
+            if ($v instanceof ClassConstFetch) {
+                $this->addClassFx($v->class);
+            }
+        }
     }
 
     private function isEventFacade(?Node $class): bool
@@ -386,10 +391,8 @@ final class EventDispatchCollector extends NodeVisitorAbstract
 
     private function addClassFx(?Node $class): void
     {
-        if ($class instanceof FullyQualified) {
-            $this->dispatched[strtolower($class->toString())] = true;
-        } elseif ($class instanceof Name) {
-            $this->dispatched[strtolower($class->toString())] = true;
+        if ($class instanceof FullyQualified || $class instanceof Name) {
+            $this->dispatched[strtolower(ltrim($class->toString(), '\\'))] = true;
         }
     }
 

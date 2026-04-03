@@ -89,7 +89,6 @@ final class PlainTextReportWriter
                     ['📛 Class', $r->className ?? '—'],
                     ['⚡ Method / symbol', $r->methodName ?? '—'],
                     ['🎯 Confidence', $r->confidenceLevel . '  (' . DetectionConfidence::shortHintForLevel($r->confidenceLevel) . ')'],
-                    ['🗑️  Safe to delete (flag)', $r->isSafeToDelete ? 'yes (still verify manually)' : 'no'],
                     ['📝 Last modified', $r->lastModified],
                 ];
 

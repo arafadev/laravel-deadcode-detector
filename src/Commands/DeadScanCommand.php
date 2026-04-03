@@ -23,7 +23,7 @@ use Arafa\DeadcodeDetector\Support\ReportPayloadBuilder;
 class DeadScanCommand extends Command
 {
     protected $signature = 'dead:scan
-                            {--details        : Show detailed table output (default behaviour)}
+                            {--details        : Wider console table (extra columns; default is a small 3-column layout)}
                             {--format=console : Terminal output: console (human tables). Use --format=json only when redirecting JSON to a file (JSON is never mixed into the normal console report).}
                             {--interactive    : Step through each finding: Delete (confirmed), Ignore (inline @deadcode-ignore), or Skip — console only}
                             {--output=        : Save report to a file. Use .json for structured JSON (same schema as --format=json). Any other extension saves a plain-text report (UTF-8).}
@@ -73,6 +73,7 @@ class DeadScanCommand extends Command
         $outputRaw    = $this->option('output');
         $outputPath   = is_string($outputRaw) ? trim($outputRaw) : '';
         $compact      = (bool) $this->option('compact');
+        $detailed     = (bool) $this->option('details');
         $onlySummary  = (bool) $this->option('only-summary');
 
         if (! $this->output->isQuiet()) {
@@ -202,7 +203,7 @@ class DeadScanCommand extends Command
         $skipConsoleDetail = $onlySummary && $outputPath !== '';
 
         if ($format === 'console' && ! $skipConsoleDetail) {
-            $reporter = new ConsoleReporter($this->output, $compact);
+            $reporter = new ConsoleReporter($this->output, $compact, $detailed);
             $reporter->report($allResults);
         }
 

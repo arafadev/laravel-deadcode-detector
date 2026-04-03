@@ -65,7 +65,7 @@ php artisan dead:scan -q   # quieter output
 | `-v` / `-vv` | Verbose analyzer output. |
 | `-q` | Quiet. |
 
-`--details` is kept for compatibility; detailed console output is already the default.
+`--details` prints a wider console table (more columns). The default console layout is a **3-column** table (`Type`, `File`, `Location`) so narrow terminals stay readable.
 
 ---
 
@@ -73,7 +73,7 @@ php artisan dead:scan -q   # quieter output
 
 ### Console
 
-- Tables (or compact lines) with file, class, method/symbol, modification time, confidence, **context hint**, **why**, **next steps**, and “safe to delete” flag when the analyzer sets it.
+- **Default:** small table per category — `Type`, `File`, `Location` (class, or `Class::method`). **`--details`** adds class, method, modified time, confidence, and a short “why”. **`--compact`** = one line per finding (`file | type | location`). Use **`--output=…txt`** for the full plain-text report (why, context, suggested actions). JSON still includes every field (e.g. `is_safe_to_delete`) for tooling.
 - If `config/deadcode.php` `ignore` or inline `@deadcode-ignore` removed items, a short line reports how many findings were hidden.
 
 ### JSON (`--format=json` or `--output=…json`)

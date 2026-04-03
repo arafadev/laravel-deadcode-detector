@@ -29,6 +29,7 @@ use Arafa\DeadcodeDetector\Support\ExtendsImplementsAndTraitsIndex;
 use Arafa\DeadcodeDetector\Support\PhpFileScanner;
 use Arafa\DeadcodeDetector\Support\PathExcludeMatcher;
 use Arafa\DeadcodeDetector\Support\ProjectPhpIterator;
+use Arafa\DeadcodeDetector\Support\ScanPathResolver;
 
 class EventsAnalyzer implements AnalyzerInterface
 {
@@ -119,29 +120,14 @@ class EventsAnalyzer implements AnalyzerInterface
      */
     private function exclusiveScanRoots(): array
     {
-        $app = function_exists('app_path') ? realpath(app_path()) : false;
-        $out = [];
-        foreach ($this->scanPaths as $d) {
-            if (! is_string($d) || ! is_dir($d)) {
-                continue;
-            }
-            $r = realpath($d);
-            if ($r === false) {
-                continue;
-            }
-            if ($app !== false && $r === $app) {
-                continue;
-            }
-            $out[] = $r;
-        }
-        if ($out === [] && function_exists('app_path')) {
-            $e = realpath(app_path('Events'));
-            if ($e !== false) {
-                $out[] = $e;
-            }
+        $deadcode = [];
+        try {
+            $c = config('deadcode', []);
+            $deadcode = is_array($c) ? $c : [];
+        } catch (\Throwable) {
         }
 
-        return $out;
+        return ScanPathResolver::dedicatedAnalyzerRoots('events', 'Events', $deadcode);
     }
 
     /**

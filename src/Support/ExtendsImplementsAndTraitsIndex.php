@@ -50,7 +50,7 @@ final class ExtendsImplementsAndTraitsIndex
         $visitor = new HierarchyTargetVisitor($used);
 
         foreach (self::eachPhpFile($scanner, $scanPaths, $excludeMatcher) as $path) {
-            $stmts = CachedAstParser::parseFile($path);
+                $stmts = PhpAstParser::parseFile($path);
             if ($stmts === null) {
                 continue;
             }

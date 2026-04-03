@@ -144,16 +144,4 @@ return [
         ],
     ],
 
-    /*
-    |--------------------------------------------------------------------------
-    | AST parse cache
-    |--------------------------------------------------------------------------
-    | Speeds up repeat scans; cache dir is created automatically under storage.
-    */
-    'cache' => [
-        'enabled'    => env('DEADCODE_CACHE', true),
-        'path'       => null, // default: storage_path('framework/deadcode')
-        /* Skip reading source when mtime/size match cached stat sidecar (AST still keyed by content hash). */
-        'stat_cache' => env('DEADCODE_CACHE_STAT', true),
-    ],
 ];

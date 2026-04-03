@@ -182,7 +182,7 @@ final class ClassKindClassifier
         $fqnLower = strtolower($fqn);
         $pathNorm = strtolower(str_replace('\\', '/', $filePath));
 
-        if (str_contains($fqnLower, '\\events\\') || str_contains($pathNorm, '/events/')) {
+        if (self::pathSuggestsDedicatedEventClass($fqnLower, $pathNorm, $short)) {
             $kinds[] = self::KIND_EVENT;
         }
         if (str_contains($pathNorm, '/listeners/')) {
@@ -399,6 +399,27 @@ final class ClassKindClassifier
         $s = $name->toString();
 
         return str_ends_with($s, '\\' . $suffix) || $s === $suffix;
+    }
+
+    /**
+     * Path/FQCN “Events” hints must not tag controllers (e.g. …/Events/Http/Controllers or *Controller).
+     */
+    private static function pathSuggestsDedicatedEventClass(string $fqnLower, string $pathNorm, string $short): bool
+    {
+        $shortLower = strtolower($short);
+        if ($shortLower !== '' && str_ends_with($shortLower, 'controller')) {
+            return false;
+        }
+
+        if (str_contains($fqnLower, '\\controllers\\') || str_contains($pathNorm, '/http/controllers/')) {
+            return false;
+        }
+
+        if (preg_match('#(^|/)controllers/#', $pathNorm) === 1) {
+            return false;
+        }
+
+        return str_contains($fqnLower, '\\events\\') || str_contains($pathNorm, '/events/');
     }
 }
 

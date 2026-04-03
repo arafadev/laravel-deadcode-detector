@@ -19,7 +19,7 @@ use PhpParser\NodeVisitor\NameResolver;
 use SplFileInfo;
 use Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface;
 use Arafa\DeadcodeDetector\DTOs\DeadCodeResult;
-use Arafa\DeadcodeDetector\Support\CachedAstParser;
+use Arafa\DeadcodeDetector\Support\PhpAstParser;
 use Arafa\DeadcodeDetector\Support\ClassKindClassifier;
 use Arafa\DeadcodeDetector\Support\DependencyGraphEngine;
 use Arafa\DeadcodeDetector\Support\ExtendsImplementsAndTraitsIndex;
@@ -158,7 +158,7 @@ class JobsAnalyzer implements AnalyzerInterface
 
     private function parseStatements(string $path): ?array
     {
-        return CachedAstParser::parseFile($path);
+        return PhpAstParser::parseFile($path);
     }
 
     private function norm(string $fqcn): string

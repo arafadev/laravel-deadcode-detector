@@ -52,7 +52,7 @@ final class ContainerBoundConcreteIndex
                 if ($path === false || $exclude->shouldExclude($path)) {
                     continue;
                 }
-                $stmts = CachedAstParser::parseFile($path);
+                $stmts = PhpAstParser::parseFile($path);
                 if ($stmts === null) {
                     continue;
                 }

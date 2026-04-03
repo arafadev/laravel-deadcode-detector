@@ -98,6 +98,46 @@ final class ScanPathResolver
     }
 
     /**
+     * Directories where a “dedicated folder” analyzer should collect its subject files only.
+     * Uses {@see $deadcode['analyzer_paths'][$configKey]} when non-empty; otherwise
+     * {@see app_path($defaultAppRelative)} if that directory exists.
+     *
+     * Unlike {@see analyzerScanPaths()}, this does **not** merge global roots — avoids treating
+     * e.g. Http/Controllers as an “Events” scan root when global paths are present.
+     *
+     * @return list<string> realpath directory roots
+     */
+    public static function dedicatedAnalyzerRoots(string $configKey, string $defaultAppRelative, array $deadcode): array
+    {
+        $analyzerPaths = $deadcode['analyzer_paths'] ?? [];
+        $custom        = is_array($analyzerPaths) ? ($analyzerPaths[$configKey] ?? null) : null;
+
+        $out = [];
+        if (is_array($custom) && $custom !== []) {
+            foreach ($custom as $p) {
+                if (! is_string($p) || $p === '') {
+                    continue;
+                }
+                $r = realpath($p);
+                if ($r !== false && is_dir($r)) {
+                    $out[] = $r;
+                }
+            }
+
+            return ProjectStructureScanner::dedupePaths($out);
+        }
+
+        if (function_exists('app_path')) {
+            $r = realpath(app_path($defaultAppRelative));
+            if ($r !== false && is_dir($r)) {
+                $out[] = $r;
+            }
+        }
+
+        return $out;
+    }
+
+    /**
      * @param mixed $value
      *
      * @return list<string>

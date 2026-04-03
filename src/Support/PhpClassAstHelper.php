@@ -48,7 +48,7 @@ final class PhpClassAstHelper
      */
     public static function classifyFile(string $absolutePath, ?ClassKindContext $ctx = null): ?array
     {
-        $stmts = CachedAstParser::parseFile($absolutePath);
+        $stmts = PhpAstParser::parseFile($absolutePath);
         $decl  = self::firstClassDeclaration($stmts);
         if ($decl === null) {
             return null;
@@ -59,7 +59,7 @@ final class PhpClassAstHelper
 
     public static function fqcnFromFile(string $absolutePath): ?string
     {
-        $stmts = CachedAstParser::parseFile($absolutePath);
+        $stmts = PhpAstParser::parseFile($absolutePath);
         $decl  = self::firstClassDeclaration($stmts);
         if ($decl === null) {
             return null;

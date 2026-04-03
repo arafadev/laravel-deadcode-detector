@@ -286,7 +286,7 @@ final class DependencyGraphEngine
         $viewRefs = new ViewReferenceCollector();
 
         foreach (ProjectPhpIterator::iterate($scanner, $scanPaths, $excludeMatcher) as $path) {
-            $stmts = CachedAstParser::parseFile($path);
+            $stmts = PhpAstParser::parseFile($path);
             if ($stmts === null) {
                 continue;
             }
@@ -311,7 +311,7 @@ final class DependencyGraphEngine
         }
 
         foreach ($this->iterateRoutePhpFiles($scanner, $excludeMatcher) as $path) {
-            $stmts = CachedAstParser::parseFile($path);
+            $stmts = PhpAstParser::parseFile($path);
             if ($stmts === null) {
                 continue;
             }

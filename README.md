@@ -105,6 +105,8 @@ Same information as JSON in a readable, non-truncated textual form.
 | `exclude_paths` (+ built-in excludes) | Files under those paths are **not walked**; they are invisible to the graph. |
 | `ignore` (classes / folders / patterns) | Files are still part of analysis; matching **findings are removed** from the report so other items stay accurate. |
 
+PHP files are parsed on each run (no AST cache under `storage`).
+
 ---
 
 ## Inline ignore (file-wide)
@@ -129,7 +131,6 @@ Applies to the **whole file** for reporting. Optional **interactive “Ignore”
 | `paths.extra` / `scan_paths` | Additional global roots. |
 | `exclude_builtin` / `exclude_paths` | Path pruning (`fnmatch` supported on user entries). |
 | `ignore` | `classes`, `folders`, `patterns` — strip findings after analysis. |
-| `cache` | AST cache under storage (`DEADCODE_CACHE`, `DEADCODE_CACHE_STAT`, etc.). |
 | `custom_analyzers` | Extra `AnalyzerInterface` classes. |
 
 Full behavior is documented in the published config file comments.
@@ -166,7 +167,7 @@ Requires an interactive terminal (`InputInterface::isInteractive()`).
 |-------|------------------|
 | `DeadScanCommand` | Runs analyzers, applies user ignore filter, writes exports, reporters, optional interactive workflow. |
 | `Analyzers/*` | Per-domain dead/unused detection. |
-| `Support/DependencyGraphEngine`, `ProjectPhpIterator`, `PathExcludeMatcher` | Graph + filesystem iteration. |
+| `Support/DependencyGraphEngine`, `ProjectPhpIterator`, `PathExcludeMatcher`, `PhpAstParser` | Graph, iteration, on-demand PHP parse (no AST cache). |
 | `DeadcodeResultIgnoreFilter`, `DeadcodeInlineIgnoreMarker` | Config/inline suppression and interactive marker insertion. |
 | `InteractiveDeadcodeWorkflow` | Delete / ignore / skip prompts. |
 | `ReportPayloadBuilder`, `PlainTextReportWriter`, `ConsoleReporter`, `JsonReporter` | Outputs. |

@@ -208,8 +208,10 @@ final class PlainTextReportWriter
      */
     private static function wrapField(string $label, string $value): array
     {
-        $labelW = 24;
-        $first  = str_pad($label . ':', $labelW);
+        $labelW = 26;
+        $labelCol = $label . ':';
+        $pad    = max(0, $labelW - self::strLenUtf8($labelCol));
+        $first  = $labelCol . str_repeat(' ', $pad);
         $maxVal = self::LINE_WIDTH - 4 - $labelW;
         $chunks = self::wrapParagraph($value, max(20, $maxVal));
         $out    = [];

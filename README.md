@@ -111,6 +111,10 @@ For each `scopeSomething` method, Laravel’s public name is **`lcfirst`** the p
 
 A service class is treated as referenced if scanned code contains **`new Service`**, **`app(Service::class)`**, **type hints** on parameters, **`Service::method()`** static calls, **`Service::class`**, or **container `bind` / `singleton` / …** concrete targets in `app/Providers` (see `ServiceBindingConcreteVisitor`).
 
+### Views analyzer — what counts as “referenced”
+
+Besides **`view('name')`**, **`View::make`**, **`Route::view($uri, 'name')`**, and Blade chains, PHP scanning includes **`$this->view('name')` / `->view('name', $data)`** on mailables (first argument is the template) and **`new Content(view: 'name')`** (`Illuminate\Mail\Mailables\Content`). **`Route::view`**: if the first argument is a string literal containing **`/`**, the second is the view; if the first argument is not a string literal (dynamic URI) but the second is, the second is treated as the view.
+
 ### `exclude_paths` vs `ignore`
 
 | Mechanism | Effect |

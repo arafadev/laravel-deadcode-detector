@@ -7,8 +7,10 @@ namespace Arafa\DeadcodeDetector\Support;
 use PhpParser\Node;
 use PhpParser\Node\Expr;
 use PhpParser\Node\Expr\BinaryOp\Concat;
+use PhpParser\Node\Arg;
 use PhpParser\Node\Expr\FuncCall;
 use PhpParser\Node\Expr\MethodCall;
+use PhpParser\Node\Expr\New_;
 use PhpParser\Node\Expr\StaticCall;
 use PhpParser\Node\Identifier;
 use PhpParser\Node\InterpolatedStringPart;
@@ -19,7 +21,8 @@ use PhpParser\Node\Scalar\String_;
 use PhpParser\NodeVisitorAbstract;
 
 /**
- * Collects view/page dot names from view(), View::make, Route::view, Inertia::render, inertia(), and dynamic prefix hints.
+ * Collects view/page dot names from view(), View::make, Mailable::view(), Route::view,
+ * Illuminate\Mail\Mailables\Content (named view:), Inertia::render, inertia(), and dynamic prefix hints.
  */
 final class ViewReferenceCollector extends NodeVisitorAbstract
 {
@@ -65,8 +68,8 @@ final class ViewReferenceCollector extends NodeVisitorAbstract
                 $this->consumeViewNameArg($node->args[0]->value ?? null);
             }
 
-            if (strtolower($m) === 'view' && isset($node->args[1])) {
-                $this->consumeViewNameArg($node->args[1]->value ?? null);
+            if (strtolower($m) === 'view') {
+                $this->consumeLaravelViewCallArgs($node->args);
             }
 
             return null;
@@ -78,8 +81,8 @@ final class ViewReferenceCollector extends NodeVisitorAbstract
                 $this->consumeViewNameArg($node->args[0]->value ?? null);
             }
 
-            if (strtolower($m) === 'view' && isset($node->args[1])) {
-                $this->consumeViewNameArg($node->args[1]->value ?? null);
+            if (strtolower($m) === 'view') {
+                $this->consumeLaravelViewCallArgs($node->args);
             }
 
             if (strtolower($m) === 'render' && $this->isInertiaClass($node->class) && isset($node->args[0])) {
@@ -89,7 +92,77 @@ final class ViewReferenceCollector extends NodeVisitorAbstract
             return null;
         }
 
+        if ($node instanceof New_ && $this->isMailMailablesContentClass($node->class)) {
+            foreach ($node->args as $arg) {
+                if (! $arg instanceof Arg || $arg->name === null) {
+                    continue;
+                }
+                if (strcasecmp($arg->name->name, 'view') !== 0) {
+                    continue;
+                }
+                $this->consumeViewNameArg($arg->value ?? null);
+            }
+
+            return null;
+        }
+
         return null;
+    }
+
+    /**
+     * Mailable::view('name') / ->view('name', $data) use the first argument. Route::view($uri, 'name') uses the
+     * second when the first literal looks like a URI (contains '/').
+     *
+     * @param array<int, Arg> $args
+     */
+    private function consumeLaravelViewCallArgs(array $args): void
+    {
+        $n = count($args);
+        if ($n < 1) {
+            return;
+        }
+
+        $v0 = $args[0]->value ?? null;
+        $v1 = $n >= 2 ? ($args[1]->value ?? null) : null;
+
+        if ($n === 1) {
+            $this->consumeViewNameArg($v0);
+
+            return;
+        }
+
+        if ($v0 instanceof String_) {
+            $s = $v0->value;
+            if (str_contains($s, '/') || str_starts_with(ltrim($s), '/')) {
+                $this->consumeViewNameArg($v1);
+
+                return;
+            }
+        }
+
+        // Route::view($uri, 'name') when $uri is not a string literal at parse time
+        if (! ($v0 instanceof String_) && $v1 instanceof String_) {
+            $this->consumeViewNameArg($v1);
+
+            return;
+        }
+
+        $this->consumeViewNameArg($v0);
+    }
+
+    private function isMailMailablesContentClass(?Node $class): bool
+    {
+        if ($class instanceof Name) {
+            return $class->getLast() === 'Content';
+        }
+        if ($class instanceof FullyQualified) {
+            $fq = ltrim($class->toString(), '\\');
+
+            return str_ends_with($fq, 'Illuminate\\Mail\\Mailables\\Content')
+                || str_ends_with($fq, 'Mail\\Mailables\\Content');
+        }
+
+        return false;
     }
 
     private function consumeViewNameArg(?Expr $expr): void

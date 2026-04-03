@@ -98,6 +98,10 @@ Same fields as JSON in a **UTF-8** report with spacing, box drawing, and emoji s
 - Dynamic Laravel usage (container resolution, config-driven class names, reflection, code outside scan roots) can lower confidence or trigger “possible dynamic” explanations.
 - Tune noise with **`ignore`** (post-analysis filter), **`@deadcode-ignore`** in the file, or **`exclude_paths`** (skip traversing paths entirely).
 
+### Events analyzer — what counts as “dispatched”
+
+Scanned PHP is checked for typical dispatch patterns, including **`event(...)`**, **`Event::dispatch(...)`** (facade), **`::dispatch` / `->dispatch`** on the event class, and **`broadcast(new YourEvent(...))`** (and `broadcast` with the same argument shapes as `event`). Patterns that pass the event through a variable only, or live outside merged scan paths, may still need manual review.
+
 ### `exclude_paths` vs `ignore`
 
 | Mechanism | Effect |

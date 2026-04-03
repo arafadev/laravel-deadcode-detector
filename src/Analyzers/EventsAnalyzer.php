@@ -358,7 +358,7 @@ final class EventDispatchCollector extends NodeVisitorAbstract
 
         if ($node instanceof FuncCall) {
             $fn = $this->funcName($node);
-            if ($fn === 'event' && isset($node->args[0])) {
+            if (($fn === 'event' || $fn === 'broadcast') && isset($node->args[0])) {
                 $v = $node->args[0]->value ?? null;
                 if ($v instanceof New_) {
                     $this->addClassFx($v->class);

@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Arafa\DeadcodeDetector\Support;
 
-use PhpParser\Error;
 use PhpParser\Node;
 use PhpParser\Node\Name;
 use PhpParser\Node\Name\FullyQualified;
@@ -40,9 +39,9 @@ final class ExtendsImplementsAndTraitsIndex
     public static function build(
         PhpFileScanner $scanner,
         array $scanPaths,
-        array $excludePaths,
+        PathExcludeMatcher $excludeMatcher,
     ): array {
-        $key = md5(serialize([$scanPaths, $excludePaths]));
+        $key = md5(serialize([$scanPaths, $excludeMatcher->cacheKey()]));
         if (self::$memo !== null && self::$memoKey === $key) {
             return self::$memo;
         }
@@ -50,18 +49,8 @@ final class ExtendsImplementsAndTraitsIndex
         $used    = [];
         $visitor = new HierarchyTargetVisitor($used);
 
-        foreach (self::eachPhpFile($scanner, $scanPaths, $excludePaths) as $path) {
-            $code = @file_get_contents($path);
-            if ($code === false) {
-                continue;
-            }
-
-            try {
-                $stmts = AstParserFactory::createParser()->parse($code);
-            } catch (Error $e) {
-                continue;
-            }
-
+        foreach (self::eachPhpFile($scanner, $scanPaths, $excludeMatcher) as $path) {
+            $stmts = CachedAstParser::parseFile($path);
             if ($stmts === null) {
                 continue;
             }
@@ -84,16 +73,26 @@ final class ExtendsImplementsAndTraitsIndex
     private static function eachPhpFile(
         PhpFileScanner $scanner,
         array $scanPaths,
-        array $excludePaths,
+        PathExcludeMatcher $excludeMatcher,
     ): \Generator {
         foreach ($scanPaths as $basePath) {
-            foreach ($scanner->scanDirectory($basePath) as $file) {
+            if (! is_string($basePath) || $basePath === '' || ! is_dir($basePath)) {
+                continue;
+            }
+            if ($excludeMatcher->shouldExclude($basePath)) {
+                continue;
+            }
+            foreach ($scanner->scanDirectoryLazy($basePath) as $file) {
                 $real = $file->getRealPath();
-                if ($real === false || self::isExcluded($real, $excludePaths)) {
+                if ($real === false || $excludeMatcher->shouldExclude($real)) {
                     continue;
                 }
                 yield $real;
             }
+        }
+
+        if (! function_exists('base_path')) {
+            return;
         }
 
         foreach (['routes', 'config', 'database'] as $dir) {
@@ -101,28 +100,17 @@ final class ExtendsImplementsAndTraitsIndex
             if (! is_dir($dirPath)) {
                 continue;
             }
-            foreach ($scanner->scanDirectory($dirPath) as $file) {
+            if ($excludeMatcher->shouldExclude($dirPath)) {
+                continue;
+            }
+            foreach ($scanner->scanDirectoryLazy($dirPath) as $file) {
                 $real = $file->getRealPath();
-                if ($real === false || self::isExcluded($real, $excludePaths)) {
+                if ($real === false || $excludeMatcher->shouldExclude($real)) {
                     continue;
                 }
                 yield $real;
             }
         }
-    }
-
-    /**
-     * @param list<string> $excludePaths
-     */
-    private static function isExcluded(string $path, array $excludePaths): bool
-    {
-        foreach ($excludePaths as $exclude) {
-            if (str_contains($path, $exclude)) {
-                return true;
-            }
-        }
-
-        return false;
     }
 }
 

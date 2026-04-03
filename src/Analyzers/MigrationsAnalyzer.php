@@ -23,14 +23,23 @@ use Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface;
 use Arafa\DeadcodeDetector\DTOs\DeadCodeResult;
 use Arafa\DeadcodeDetector\Support\AstParserFactory;
 use Arafa\DeadcodeDetector\Support\PhpFileScanner;
+use Arafa\DeadcodeDetector\Support\PathExcludeMatcher;
 
 class MigrationsAnalyzer implements AnalyzerInterface
 {
     public function __construct(
         private readonly PhpFileScanner $scanner,
         private readonly array $scanPaths,
-        private readonly array $excludePaths = [],
+        private readonly PathExcludeMatcher $pathExclude,
     ) {}
+
+    /**
+     * @return list<string>
+     */
+    public static function defaultScanPaths(): array
+    {
+        return function_exists('database_path') ? [database_path('migrations')] : [];
+    }
 
     public function getName(): string
     {
@@ -101,7 +110,7 @@ class MigrationsAnalyzer implements AnalyzerInterface
         }
 
         $files = [];
-        foreach ($this->scanner->scanDirectory($migrationsDir) as $file) {
+        foreach ($this->scanner->scanDirectoryLazy($migrationsDir) as $file) {
             $real = $file->getRealPath();
             if ($real !== false && ! $this->isExcluded($real)) {
                 $files[] = $file;
@@ -233,13 +242,7 @@ class MigrationsAnalyzer implements AnalyzerInterface
 
     private function isExcluded(string $path): bool
     {
-        foreach ($this->excludePaths as $exclude) {
-            if (str_contains($path, $exclude)) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->pathExclude->shouldExclude($path);
     }
 }
 

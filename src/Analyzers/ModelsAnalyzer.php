@@ -6,8 +6,10 @@ namespace Arafa\DeadcodeDetector\Analyzers;
 
 use PhpParser\Error;
 use PhpParser\Node;
+use PhpParser\Node\Expr\Array_;
 use PhpParser\Node\Expr\ClassConstFetch;
 use PhpParser\Node\Expr\Instanceof_;
+use PhpParser\Node\Expr\MethodCall;
 use PhpParser\Node\Expr\New_;
 use PhpParser\Node\Expr\StaticCall;
 use PhpParser\Node\Identifier;
@@ -22,6 +24,7 @@ use PhpParser\Node\Stmt\Property;
 use PhpParser\Node\Stmt\Class_;
 use PhpParser\Node\Stmt\ClassMethod;
 use PhpParser\Node\Stmt\Function_;
+use PhpParser\Node\Scalar\String_;
 use PhpParser\Node\Stmt\Namespace_;
 use PhpParser\Node\UnionType;
 use PhpParser\NodeVisitor;
@@ -31,16 +34,27 @@ use SplFileInfo;
 use Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface;
 use Arafa\DeadcodeDetector\DTOs\DeadCodeResult;
 use Arafa\DeadcodeDetector\Support\AstParserFactory;
+use Arafa\DeadcodeDetector\Support\ClassKindClassifier;
 use Arafa\DeadcodeDetector\Support\ExtendsImplementsAndTraitsIndex;
+use Arafa\DeadcodeDetector\Support\PhpClassAstHelper;
 use Arafa\DeadcodeDetector\Support\PhpFileScanner;
+use Arafa\DeadcodeDetector\Support\PathExcludeMatcher;
 
 class ModelsAnalyzer implements AnalyzerInterface
 {
     public function __construct(
         private readonly PhpFileScanner $scanner,
         private readonly array $scanPaths,
-        private readonly array $excludePaths = [],
+        private readonly PathExcludeMatcher $pathExclude,
     ) {}
+
+    /**
+     * @return list<string>
+     */
+    public static function defaultScanPaths(): array
+    {
+        return function_exists('app_path') ? [app_path()] : [];
+    }
 
     public function getName(): string
     {
@@ -80,7 +94,7 @@ class ModelsAnalyzer implements AnalyzerInterface
         $hierarchyTargets = ExtendsImplementsAndTraitsIndex::build(
             $this->scanner,
             $this->scanPaths,
-            $this->excludePaths,
+            $this->pathExclude,
         );
 
         $results = [];
@@ -169,12 +183,17 @@ class ModelsAnalyzer implements AnalyzerInterface
             }
 
             $visitor = new ModelReferenceVisitor($modelSet);
+            $adv     = new ModelAdvancedReferenceVisitor($modelSet);
             $traverser = new NodeTraverser();
             $traverser->addVisitor(new NameResolver());
             $traverser->addVisitor($visitor);
+            $traverser->addVisitor($adv);
             $traverser->traverse($stmts);
 
             foreach ($visitor->getReferencedNormalizedFqcn() as $n => $_) {
+                $referenced[$n] = true;
+            }
+            foreach ($adv->getReferencedNormalizedFqcn() as $n => $_) {
                 $referenced[$n] = true;
             }
         }
@@ -189,7 +208,7 @@ class ModelsAnalyzer implements AnalyzerInterface
     private function iteratePhpFilesOutsideModels(array $modelPathLookup): \Generator
     {
         foreach ($this->scanPaths as $basePath) {
-            foreach ($this->scanner->scanDirectory($basePath) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($basePath) as $file) {
                 $real = $file->getRealPath();
                 if ($real === false || isset($modelPathLookup[$real]) || $this->isExcluded($real)) {
                     continue;
@@ -198,12 +217,12 @@ class ModelsAnalyzer implements AnalyzerInterface
             }
         }
 
-        foreach (['routes', 'config', 'database'] as $dir) {
+        foreach (['routes', 'config', 'database', 'bootstrap'] as $dir) {
             $dirPath = base_path($dir);
             if (! is_dir($dirPath)) {
                 continue;
             }
-            foreach ($this->scanner->scanDirectory($dirPath) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($dirPath) as $file) {
                 $real = $file->getRealPath();
                 if ($real === false || isset($modelPathLookup[$real]) || $this->isExcluded($real)) {
                     continue;
@@ -246,7 +265,7 @@ class ModelsAnalyzer implements AnalyzerInterface
                     continue;
                 }
 
-                foreach ($this->scanner->scanDirectory($dir) as $file) {
+                foreach ($this->scanner->scanDirectoryLazy($dir) as $file) {
                     $real = $file->getRealPath();
                     if ($real === false || $this->isExcluded($real)) {
                         continue;
@@ -269,18 +288,9 @@ class ModelsAnalyzer implements AnalyzerInterface
             return false;
         }
 
-        $stmts = $this->parseStatements($path);
-        if ($stmts === null) {
-            return false;
-        }
+        $kinds = PhpClassAstHelper::classifyFile($path);
 
-        $visitor = new EloquentModelDetectionVisitor();
-        $traverser = new NodeTraverser();
-        $traverser->addVisitor(new NameResolver());
-        $traverser->addVisitor($visitor);
-        $traverser->traverse($stmts);
-
-        return $visitor->isEloquentModel();
+        return $kinds !== null && ClassKindClassifier::hasKind($kinds, ClassKindClassifier::KIND_MODEL);
     }
 
     private function extractClassNameFromFile(SplFileInfo $file): ?string
@@ -321,13 +331,7 @@ class ModelsAnalyzer implements AnalyzerInterface
 
     private function isExcluded(string $path): bool
     {
-        foreach ($this->excludePaths as $exclude) {
-            if (str_contains($path, $exclude)) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->pathExclude->shouldExclude($path);
     }
 
     /**
@@ -389,7 +393,7 @@ class ModelsAnalyzer implements AnalyzerInterface
     private function iteratePhpFilesForScopeSearch(array $modelPaths): \Generator
     {
         foreach ($this->scanPaths as $basePath) {
-            foreach ($this->scanner->scanDirectory($basePath) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($basePath) as $file) {
                 $real = $file->getRealPath();
                 if ($real === false || isset($modelPaths[$real]) || $this->isExcluded($real)) {
                     continue;
@@ -398,18 +402,122 @@ class ModelsAnalyzer implements AnalyzerInterface
             }
         }
 
-        foreach (['routes', 'config', 'database'] as $dir) {
+        foreach (['routes', 'config', 'database', 'bootstrap'] as $dir) {
             $dirPath = base_path($dir);
             if (! is_dir($dirPath)) {
                 continue;
             }
-            foreach ($this->scanner->scanDirectory($dirPath) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($dirPath) as $file) {
                 $real = $file->getRealPath();
                 if ($real === false || isset($modelPaths[$real]) || $this->isExcluded($real)) {
                     continue;
                 }
                 yield $real;
             }
+        }
+    }
+}
+
+/** Records extra model refs: relationship helpers with string class names, morphMap arrays, container bindings. */
+final class ModelAdvancedReferenceVisitor extends NodeVisitorAbstract
+{
+    private const RELATION_METHODS = [
+        'hasOne', 'hasMany', 'belongsTo', 'belongsToMany', 'hasManyThrough',
+        'morphTo', 'morphOne', 'morphMany', 'morphToMany',
+    ];
+
+    /**
+     * @param array<string, true> $modelFqcnNormalizedSet
+     */
+    public function __construct(
+        private readonly array $modelFqcnNormalizedSet,
+    ) {}
+
+    /** @var array<string, true> */
+    private array $referenced = [];
+
+    /**
+     * @return array<string, true>
+     */
+    public function getReferencedNormalizedFqcn(): array
+    {
+        return $this->referenced;
+    }
+
+    public function enterNode(Node $node): ?int
+    {
+        if ($node instanceof MethodCall && $node->name instanceof Identifier) {
+            $m = $node->name->name;
+            if (in_array($m, self::RELATION_METHODS, true) && isset($node->args[0])) {
+                $a0 = $node->args[0]->value ?? null;
+                $this->maybeAddStringClassArg($a0);
+                if ($a0 instanceof ClassConstFetch) {
+                    $this->maybeAddClassExpr($a0->class);
+                }
+            }
+
+            if (in_array($m, ['bind', 'singleton', 'scoped', 'instance'], true)) {
+                foreach ($node->args as $i => $arg) {
+                    if ($i === 0) {
+                        continue;
+                    }
+                    $v = $arg->value ?? null;
+                    if ($v instanceof ClassConstFetch) {
+                        $this->maybeAddClassExpr($v->class);
+                    }
+                }
+            }
+        }
+
+        if ($node instanceof StaticCall && $node->name instanceof Identifier) {
+            if (strtolower($node->name->name) === 'morphmap' && isset($node->args[0])) {
+                $this->walkMorphMapArray($node->args[0]->value ?? null);
+            }
+        }
+
+        return null;
+    }
+
+    private function walkMorphMapArray(?Node $expr): void
+    {
+        if (! $expr instanceof Array_) {
+            return;
+        }
+        foreach ($expr->items as $item) {
+            if ($item === null) {
+                continue;
+            }
+            $v = $item->value ?? null;
+            if ($v instanceof ClassConstFetch) {
+                $this->maybeAddClassExpr($v->class);
+            }
+        }
+    }
+
+    private function maybeAddStringClassArg(?Node $expr): void
+    {
+        if ($expr instanceof String_) {
+            $s = trim($expr->value);
+            if ($s !== '' && str_contains($s, '\\')) {
+                $this->maybeAddNormalized(str_replace('/', '\\', $s));
+            }
+        }
+    }
+
+    private function maybeAddClassExpr(?Node $expr): void
+    {
+        if ($expr instanceof FullyQualified) {
+            $this->maybeAddNormalized($expr->toString());
+        } elseif ($expr instanceof Name) {
+            $this->maybeAddNormalized($expr->toString());
+        }
+    }
+
+    private function maybeAddNormalized(string $nameOrFqcn): void
+    {
+        $n = strtolower(ltrim($nameOrFqcn, '\\'));
+        if (isset($this->modelFqcnNormalizedSet[$n])) {
+            $this->referenced[$n] = true;
         }
     }
 }
@@ -494,51 +602,6 @@ final class ModelScopeStaticCallVisitor extends NodeVisitorAbstract
         }
 
         return null;
-    }
-}
-
-/** Detects classes that extend Eloquent Model / Authenticatable / Pivot. */
-final class EloquentModelDetectionVisitor extends NodeVisitorAbstract
-{
-    private bool $match = false;
-
-    public function enterNode(Node $node): ?int
-    {
-        if (! $node instanceof Class_ || $node->extends === null) {
-            return null;
-        }
-
-        $parent = $node->extends;
-        if ($parent instanceof Name) {
-            $name = $parent->getLast();
-        } elseif ($parent instanceof FullyQualified) {
-            $name = $parent->getLast();
-        } else {
-            return null;
-        }
-
-        $full = $parent instanceof FullyQualified ? $parent->toString() : $name;
-
-        if (in_array($name, ['Model', 'Authenticatable', 'Pivot'], true)) {
-            $this->match = true;
-
-            return null;
-        }
-
-        if (
-            str_ends_with($full, '\\Model')
-            || str_ends_with($full, '\\Authenticatable')
-            || str_ends_with($full, '\\Pivot')
-        ) {
-            $this->match = true;
-        }
-
-        return null;
-    }
-
-    public function isEloquentModel(): bool
-    {
-        return $this->match;
     }
 }
 

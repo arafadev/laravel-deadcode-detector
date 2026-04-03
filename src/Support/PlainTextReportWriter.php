@@ -40,12 +40,30 @@ final class PlainTextReportWriter
             $lines[] = str_repeat('-', 80);
 
             foreach ($items as $r) {
+                $reason = $r->reason !== null && $r->reason !== ''
+                    ? $r->reason
+                    : '(no reason — check analyzer configuration)';
                 $lines[] = 'NOT USED';
-                $lines[] = '  file_path   : ' . $r->filePath;
-                $lines[] = '  class       : ' . ($r->className ?? '(none)');
-                $lines[] = '  method/name : ' . ($r->methodName ?? '(none)');
-                $lines[] = '  modified    : ' . $r->lastModified;
-                $lines[] = '  analyzer    : ' . $r->analyzerName;
+                $lines[] = '  file_path        : ' . $r->filePath;
+                $lines[] = '  type             : ' . $r->type;
+                $lines[] = '  reason           : ' . $reason;
+                $lines[] = '  confidence_level : ' . $r->confidenceLevel;
+                $lines[] = '  class_name       : ' . ($r->className ?? '(none)');
+                $lines[] = '  method_name      : ' . ($r->methodName ?? '(none)');
+                $lines[] = '  analyzer_name    : ' . $r->analyzerName;
+                $lines[] = '  last_modified    : ' . $r->lastModified;
+                $lines[] = '  is_safe_to_delete: ' . ($r->isSafeToDelete ? 'yes' : 'no');
+                $lines[] = '  context_hint     : ' . FindingFixSuggestion::contextHint($r);
+                $lines[] = '  next_steps_line  : ' . FindingFixSuggestion::actionsSummaryLine($r);
+                $lines[] = '  suggested_actions:';
+                foreach (FindingFixSuggestion::suggestedActions($r) as $step) {
+                    $lines[] = sprintf(
+                        '    - [%s] %s — %s',
+                        $step['action'],
+                        $step['label'],
+                        $step['detail']
+                    );
+                }
                 $lines[] = '';
             }
         }

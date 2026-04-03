@@ -6,33 +6,56 @@ namespace Arafa\DeadcodeDetector\Commands;
 
 use Illuminate\Console\Command;
 use Illuminate\Contracts\Container\Container;
+use Symfony\Component\Console\Output\OutputInterface;
 use Throwable;
 use Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface;
 use Arafa\DeadcodeDetector\Reporters\ConsoleReporter;
 use Arafa\DeadcodeDetector\Reporters\JsonReporter;
+use Arafa\DeadcodeDetector\Support\CliScanPreflight;
+use Arafa\DeadcodeDetector\Support\DeadcodeResultIgnoreFilter;
+use Arafa\DeadcodeDetector\Support\InteractiveDeadcodeWorkflow;
+use Arafa\DeadcodeDetector\Support\DetectionConfidence;
+use Arafa\DeadcodeDetector\Support\PathExcludeMatcher;
+use Arafa\DeadcodeDetector\Support\PhpFileScanner;
 use Arafa\DeadcodeDetector\Support\PlainTextReportWriter;
+use Arafa\DeadcodeDetector\Support\ReportPayloadBuilder;
 
 class DeadScanCommand extends Command
 {
     protected $signature = 'dead:scan
                             {--details        : Show detailed table output (default behaviour)}
                             {--format=console : Terminal output: console (human tables). Use --format=json only when redirecting JSON to a file (JSON is never mixed into the normal console report).}
-                            {--interactive    : Prompt before each potential deletion}
-                            {--output=        : Save the complete report to this file (UTF-8). Use when there are many findings — terminal scrollback is limited.}
+                            {--interactive    : Step through each finding: Delete (confirmed), Ignore (inline @deadcode-ignore), or Skip — console only}
+                            {--output=        : Save report to a file. Use .json for structured JSON (same schema as --format=json). Any other extension saves a plain-text report (UTF-8).}
                             {--compact        : One line per finding in the terminal (less scrolling)}
                             {--only-summary   : With --output, skip tables in the terminal (only counts + file path)}';
 
-    protected $description = 'Scan your Laravel application for dead / unused code.';
+    protected $description = 'Scan your Laravel application for dead / unused code. Each finding includes contextual hints and safe next steps (review / delete only after confirmation / config exclude). Use --interactive with console format to delete files (double-confirmed), add // @deadcode-ignore, or skip each item. Suppress false positives via config/deadcode.php → ignore or inline markers (see config). Use -v for per-analyzer detail; use -q for minimal output.';
 
     /** Map config key → analyzer FQCN (mirrors ServiceProvider::BUILTIN_ANALYZERS) */
     private const BUILTIN_MAP = [
-        'controllers' => \Arafa\DeadcodeDetector\Analyzers\ControllersAnalyzer::class,
-        'models'      => \Arafa\DeadcodeDetector\Analyzers\ModelsAnalyzer::class,
-        'views'       => \Arafa\DeadcodeDetector\Analyzers\ViewsAnalyzer::class,
-        'routes'      => \Arafa\DeadcodeDetector\Analyzers\RoutesAnalyzer::class,
-        'middlewares' => \Arafa\DeadcodeDetector\Analyzers\MiddlewaresAnalyzer::class,
-        'migrations'  => \Arafa\DeadcodeDetector\Analyzers\MigrationsAnalyzer::class,
-        'helpers'     => \Arafa\DeadcodeDetector\Analyzers\HelpersAnalyzer::class,
+        'controllers'       => \Arafa\DeadcodeDetector\Analyzers\ControllersAnalyzer::class,
+        'models'            => \Arafa\DeadcodeDetector\Analyzers\ModelsAnalyzer::class,
+        'views'             => \Arafa\DeadcodeDetector\Analyzers\ViewsAnalyzer::class,
+        'routes'            => \Arafa\DeadcodeDetector\Analyzers\RoutesAnalyzer::class,
+        'middlewares'       => \Arafa\DeadcodeDetector\Analyzers\MiddlewaresAnalyzer::class,
+        'migrations'        => \Arafa\DeadcodeDetector\Analyzers\MigrationsAnalyzer::class,
+        'helpers'           => \Arafa\DeadcodeDetector\Analyzers\HelpersAnalyzer::class,
+        'requests'          => \Arafa\DeadcodeDetector\Analyzers\RequestsAnalyzer::class,
+        'resources'         => \Arafa\DeadcodeDetector\Analyzers\ResourcesAnalyzer::class,
+        'policies'          => \Arafa\DeadcodeDetector\Analyzers\PoliciesAnalyzer::class,
+        'actions'           => \Arafa\DeadcodeDetector\Analyzers\ActionsAnalyzer::class,
+        'services'          => \Arafa\DeadcodeDetector\Analyzers\ServicesAnalyzer::class,
+        'commands'          => \Arafa\DeadcodeDetector\Analyzers\CommandsAnalyzer::class,
+        'notifications'     => \Arafa\DeadcodeDetector\Analyzers\NotificationsAnalyzer::class,
+        'mailables'         => \Arafa\DeadcodeDetector\Analyzers\MailablesAnalyzer::class,
+        'rules'             => \Arafa\DeadcodeDetector\Analyzers\RulesAnalyzer::class,
+        'enums'             => \Arafa\DeadcodeDetector\Analyzers\EnumsAnalyzer::class,
+        'jobs'              => \Arafa\DeadcodeDetector\Analyzers\JobsAnalyzer::class,
+        'events'            => \Arafa\DeadcodeDetector\Analyzers\EventsAnalyzer::class,
+        'listeners'         => \Arafa\DeadcodeDetector\Analyzers\ListenersAnalyzer::class,
+        'observers'         => \Arafa\DeadcodeDetector\Analyzers\ObserversAnalyzer::class,
+        'service_bindings'  => \Arafa\DeadcodeDetector\Analyzers\ServiceBindingsAnalyzer::class,
     ];
 
     public function __construct(private readonly Container $container)
@@ -47,70 +70,135 @@ class DeadScanCommand extends Command
             $format = 'console';
         }
         $interactive  = (bool) $this->option('interactive');
-        $outputRaw   = $this->option('output');
-        $outputPath  = is_string($outputRaw) ? trim($outputRaw) : '';
-        $compact     = (bool) $this->option('compact');
-        $onlySummary = (bool) $this->option('only-summary');
+        $outputRaw    = $this->option('output');
+        $outputPath   = is_string($outputRaw) ? trim($outputRaw) : '';
+        $compact      = (bool) $this->option('compact');
+        $onlySummary  = (bool) $this->option('only-summary');
 
-        $this->info('');
-        $this->info('  🔍 <options=bold>Laravel Dead Code Detector</>');
-        $this->info('  ─────────────────────────────────────────');
+        if (! $this->output->isQuiet()) {
+            $this->renderHeader();
+        }
 
         $analyzerClasses = $this->resolveEnabledAnalyzers();
 
-        if (empty($analyzerClasses)) {
-            $this->warn('  No analyzers are enabled. Check your config/deadcode.php file.');
+        if ($analyzerClasses === []) {
+            if (! $this->output->isQuiet()) {
+                $this->warn('  <fg=yellow>No analyzers are enabled.</> Check <fg=white>config/deadcode.php</>.');
+            }
+
             return self::SUCCESS;
         }
 
-        $this->info(sprintf('  Running <fg=cyan>%d</> analyzer(s)...', count($analyzerClasses)));
-        $this->info('');
+        $scanner = $this->container->make(PhpFileScanner::class);
+        $exclude = $this->container->make(PathExcludeMatcher::class);
+
+        $phpFilesInScope = CliScanPreflight::countUniquePhpFilesInMergedScope($scanner, $exclude, $analyzerClasses);
 
         $allResults = [];
         $errors     = [];
+
+        $useProgressBar = $format === 'console'
+            && ! $this->output->isQuiet()
+            && $this->output->getVerbosity() === OutputInterface::VERBOSITY_NORMAL;
+
+        $bar = null;
+        if ($useProgressBar) {
+            $bar = $this->output->createProgressBar(count($analyzerClasses));
+            $bar->setFormat(' %current%/%max% [%bar%] %percent:3s%%  %message%');
+            $bar->setMessage('starting…');
+            $bar->start();
+        } else {
+            if (! $this->output->isQuiet()) {
+                $this->line(sprintf(
+                    '  <fg=gray>Running</> <fg=cyan>%d</> <fg=gray>analyzer(s)…</>',
+                    count($analyzerClasses)
+                ));
+                $this->line('');
+            }
+        }
 
         foreach ($analyzerClasses as $key => $analyzerClass) {
             try {
                 /** @var AnalyzerInterface $analyzer */
                 $analyzer = $this->container->make($analyzerClass);
 
-                $this->line("  ↳ <comment>{$analyzer->getName()}</comment>: {$analyzer->getDescription()}");
+                if ($bar !== null) {
+                    $bar->setMessage($analyzer->getName());
+                } elseif (! $this->output->isQuiet()) {
+                    $this->line(sprintf('  <fg=gray>▸</> <fg=cyan>%s</>', $analyzer->getName()));
+                    if ($this->output->isVerbose()) {
+                        $this->line(sprintf('    <fg=gray>%s</>', $analyzer->getDescription()));
+                    }
+                }
 
                 $results    = $analyzer->analyze();
                 $allResults = array_merge($allResults, $results);
 
-                $count = count($results);
-                $label = $count === 0
-                    ? '<fg=green>✓ Clean</>'
-                    : "<fg=red>✗ {$count} found</>";
+                if ($bar === null && ! $this->output->isQuiet()) {
+                    $count = count($results);
+                    $label = $count === 0
+                        ? '<fg=green>✓ clean</>'
+                        : "<fg=red>✗ {$count} finding(s)</>";
+                    $this->line(sprintf('     %s', $label));
+                }
 
-                $this->line("     {$label}");
-
+                $bar?->advance();
             } catch (Throwable $e) {
                 $errors[$key] = $e->getMessage();
-                $this->warn("  ✗ Analyzer [{$key}] failed: {$e->getMessage()}");
+                $bar?->advance();
+                if (! $this->output->isQuiet()) {
+                    $this->newLine();
+                    $this->warn("  <fg=yellow>Analyzer failed</> [<fg=white>{$key}</>]: {$e->getMessage()}");
+                }
             }
         }
 
-        $this->info('');
-        $this->info('  ─────────────────────────────────────────');
+        if ($bar !== null) {
+            $bar->finish();
+            $this->newLine(2);
+        }
+
+        if (! $this->output->isQuiet()) {
+            $this->line('  <fg=gray>────────────────────────────────────────</>');
+        }
+
+        $ignoreFilter     = $this->container->make(DeadcodeResultIgnoreFilter::class);
+        $beforeUserIgnore = count($allResults);
+        $allResults       = $ignoreFilter->filterResults($allResults);
+        $userIgnored      = $beforeUserIgnore - count($allResults);
+
+        if ($userIgnored > 0 && ! $this->output->isQuiet()) {
+            $this->line(sprintf(
+                '  <fg=gray>User ignore rules</> <fg=cyan>(config + %s)</> <fg=gray>hid</> <fg=white>%d</> <fg=gray>finding(s).</>',
+                DeadcodeResultIgnoreFilter::INLINE_TAG,
+                $userIgnored
+            ));
+            $this->line('');
+        }
 
         if ($outputPath !== '') {
             try {
-                PlainTextReportWriter::write($outputPath, $allResults);
-                $this->info(sprintf(
-                    '  <fg=green>✓</> Full report written (<fg=cyan>%d</> item(s)): <fg=white>%s</>',
-                    count($allResults),
-                    $outputPath
-                ));
-                $this->info('  <fg=gray>(Open this file in your editor — the terminal cannot show unlimited lines.)</>');
-                $this->info('');
+                if (ReportPayloadBuilder::isJsonExportPath($outputPath)) {
+                    ReportPayloadBuilder::writeJsonFile($outputPath, $allResults, $phpFilesInScope);
+                    $kind = 'JSON';
+                } else {
+                    PlainTextReportWriter::write($outputPath, $allResults);
+                    $kind = 'text';
+                }
+                if (! $this->output->isQuiet()) {
+                    $this->info(sprintf(
+                        '  <fg=green>✓</> %s report written: <fg=white>%s</> <fg=gray>(%d finding(s))</>',
+                        $kind,
+                        $outputPath,
+                        count($allResults)
+                    ));
+                    $this->line('');
+                }
             } catch (Throwable $e) {
                 $this->error('  Failed to write --output file: ' . $e->getMessage());
             }
         }
 
-        // ── Reporters ─────────────────────────────────────────────────────────
         $skipConsoleDetail = $onlySummary && $outputPath !== '';
 
         if ($format === 'console' && ! $skipConsoleDetail) {
@@ -120,57 +208,129 @@ class DeadScanCommand extends Command
 
         if ($skipConsoleDetail && $allResults !== []) {
             $this->line(sprintf(
-                '  <fg=yellow>Summary only:</> <fg=red;options=bold>%d</> NOT USED item(s) (see <fg=white>%s</>)',
+                '  <fg=yellow>Summary only:</> <fg=red;options=bold>%d</> item(s) — see <fg=white>%s</>',
                 count($allResults),
                 $outputPath
             ));
-            $this->info('');
+            $this->line('');
         }
 
         if ($format === 'json') {
-            $reporter = new JsonReporter($this->output);
+            $reporter = new JsonReporter($this->output, $phpFilesInScope);
             $reporter->report($allResults);
         }
 
-        // ── Interactive mode ──────────────────────────────────────────────────
-        if ($interactive && ! empty($allResults)) {
-            $this->info('  <options=bold>Interactive Mode</> — review each item:');
-            foreach ($allResults as $result) {
-                $answer = $this->confirm(
-                    "  Mark [{$result->filePath}] for deletion?",
-                    false
-                );
-                if ($answer) {
-                    $this->line("  <fg=yellow>→ Marked:</> {$result->filePath}");
+        if ($format === 'console' && ! $this->output->isQuiet()) {
+            $this->renderClosingSummary($phpFilesInScope, $allResults);
+        }
+
+        if ($interactive) {
+            if ($format !== 'console') {
+                if (! $this->output->isQuiet()) {
+                    $this->warn('  <fg=yellow>--interactive</> runs only with <fg=white>--format=console</> (not json).');
+                    $this->line('');
                 }
+            } elseif ($allResults !== []) {
+                InteractiveDeadcodeWorkflow::run($this, $allResults);
+            } elseif (! $this->output->isQuiet()) {
+                $this->line('  <fg=gray>Interactive:</> nothing to review (0 findings).');
+                $this->line('');
             }
         }
 
-        // ── Errors summary ────────────────────────────────────────────────────
-        if (! empty($errors)) {
-            $this->warn('');
-            $this->warn('  Analyzers that encountered errors:');
+        if ($errors !== []) {
+            $this->line('');
+            $this->warn('  <fg=yellow>Some analyzers failed:</>');
             foreach ($errors as $key => $message) {
-                $this->line("  • [{$key}] {$message}");
+                $this->line("    <fg=red>•</> [<fg=white>{$key}</>] {$message}");
             }
+            $this->line('');
         }
 
         return self::SUCCESS;
     }
 
-    // ── Private helpers ───────────────────────────────────────────────────────
+    private function renderHeader(): void
+    {
+        $this->line('');
+        $this->line('  <fg=cyan;options=bold>Laravel Dead Code Detector</>');
+        $this->line('  <fg=gray>Static analysis for unused controllers, views, routes, and more.</>');
+        $this->line('');
+    }
 
+    /**
+     * @param list<\Arafa\DeadcodeDetector\DTOs\DeadCodeResult> $results
+     */
+    private function renderClosingSummary(int $phpFilesInScope, array $results): void
+    {
+        $total = count($results);
+
+        $by = [
+            DetectionConfidence::HIGH    => 0,
+            DetectionConfidence::MEDIUM => 0,
+            DetectionConfidence::LOW    => 0,
+        ];
+        foreach ($results as $r) {
+            if (isset($by[$r->confidenceLevel])) {
+                ++$by[$r->confidenceLevel];
+            }
+        }
+
+        $this->line('  <fg=gray>════════════════════════════════════════</>');
+        $this->line('  <options=bold>Summary</>');
+        $this->line('');
+        $this->line(sprintf(
+            '  <fg=gray>PHP files in merged scan scope (unique):</>  <fg=white>%s</>',
+            number_format($phpFilesInScope)
+        ));
+
+        if ($total === 0) {
+            $this->line('  <fg=gray>Possible dead-code findings:</>             <fg=green;options=bold>0  — workspace looks clean</>');
+        } else {
+            $this->line(sprintf(
+                '  <fg=gray>Possible dead-code findings:</>             <fg=red;options=bold>%s</>',
+                number_format($total)
+            ));
+            $this->line('');
+            $this->line('  <fg=gray>By confidence</> <fg=gray>(review before deleting):</>');
+            $this->line(sprintf(
+                '    <fg=red>●</> High    %s  <fg=gray>%s</>',
+                str_pad((string) $by[DetectionConfidence::HIGH], 5, ' ', STR_PAD_LEFT),
+                DetectionConfidence::shortHintForLevel(DetectionConfidence::HIGH)
+            ));
+            $this->line(sprintf(
+                '    <fg=yellow>●</> Medium  %s  <fg=gray>%s</>',
+                str_pad((string) $by[DetectionConfidence::MEDIUM], 5, ' ', STR_PAD_LEFT),
+                DetectionConfidence::shortHintForLevel(DetectionConfidence::MEDIUM)
+            ));
+            $this->line(sprintf(
+                '    <fg=yellow>●</> Low     %s  <fg=gray>%s</>',
+                str_pad((string) $by[DetectionConfidence::LOW], 5, ' ', STR_PAD_LEFT),
+                DetectionConfidence::shortHintForLevel(DetectionConfidence::LOW)
+            ));
+        }
+
+        $this->line('');
+        $this->line('  <fg=gray>────────────────────────────────────────</>');
+        $this->line('  <fg=green>Green</> clean  ·  <fg=yellow>Yellow</> caution  ·  <fg=red>Red</> findings (re-check with tests & VCS)');
+        $this->line('');
+    }
+
+    /**
+     * @return array<string, string>
+     */
     private function resolveEnabledAnalyzers(): array
     {
         $configAnalyzers = config('deadcode.analyzers', []);
         $customAnalyzers = config('deadcode.custom_analyzers', []);
         $enabled         = [];
 
-        // Built-ins
         foreach (self::BUILTIN_MAP as $key => $defaultClass) {
             $value = $configAnalyzers[$key] ?? false;
 
-            if ($value === false) continue;
+            if ($value === false) {
+                continue;
+            }
 
             $resolvedClass = (is_string($value) && class_exists($value))
                 ? $value
@@ -179,7 +339,6 @@ class DeadScanCommand extends Command
             $enabled[$key] = $resolvedClass;
         }
 
-        // Custom analyzers
         foreach ($customAnalyzers as $class) {
             if (class_exists($class)) {
                 $enabled[$class] = $class;

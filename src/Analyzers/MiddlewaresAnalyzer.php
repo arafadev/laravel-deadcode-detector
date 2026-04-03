@@ -8,6 +8,7 @@ use PhpParser\Error;
 use PhpParser\Node;
 use PhpParser\Node\Attribute;
 use PhpParser\Node\AttributeGroup;
+use PhpParser\Node\Expr\Array_;
 use PhpParser\Node\Expr\ClassConstFetch;
 use PhpParser\Node\Expr\MethodCall;
 use PhpParser\Node\Expr\New_;
@@ -17,7 +18,6 @@ use PhpParser\Node\Name\FullyQualified;
 use PhpParser\Node\Scalar\String_;
 use PhpParser\Node\Stmt\Class_;
 use PhpParser\Node\Stmt\ClassMethod;
-use PhpParser\Node\Stmt\Namespace_;
 use PhpParser\NodeTraverser;
 use PhpParser\NodeVisitorAbstract;
 use PhpParser\NodeVisitor\NameResolver;
@@ -25,16 +25,32 @@ use SplFileInfo;
 use Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface;
 use Arafa\DeadcodeDetector\DTOs\DeadCodeResult;
 use Arafa\DeadcodeDetector\Support\AstParserFactory;
+use Arafa\DeadcodeDetector\Support\ClassKindClassifier;
 use Arafa\DeadcodeDetector\Support\ExtendsImplementsAndTraitsIndex;
+use Arafa\DeadcodeDetector\Support\PhpClassAstHelper;
 use Arafa\DeadcodeDetector\Support\PhpFileScanner;
+use Arafa\DeadcodeDetector\Support\PhpFilesUnderScanPaths;
+use Arafa\DeadcodeDetector\Support\PathExcludeMatcher;
 
 class MiddlewaresAnalyzer implements AnalyzerInterface
 {
     public function __construct(
         private readonly PhpFileScanner $scanner,
         private readonly array $scanPaths,
-        private readonly array $excludePaths = [],
+        private readonly PathExcludeMatcher $pathExclude,
     ) {}
+
+    /**
+     * @return list<string>
+     */
+    public static function defaultScanPaths(): array
+    {
+        if (! function_exists('app_path')) {
+            return [];
+        }
+
+        return [app_path('Http/Middleware')];
+    }
 
     public function getName(): string
     {
@@ -48,21 +64,23 @@ class MiddlewaresAnalyzer implements AnalyzerInterface
 
     public function analyze(): array
     {
-        $middlewareFiles = $this->findMiddlewareFiles();
-
-        if ($middlewareFiles === []) {
-            return [];
-        }
-
         /** @var array<string, array{file: SplFileInfo, fqcn: string}> */
         $metaByNorm = [];
 
-        foreach ($middlewareFiles as $file) {
-            $fqcn = $this->extractClassNameFromFile($file);
+        foreach (PhpFilesUnderScanPaths::eachUniqueRealPath($this->scanner, $this->scanPaths, $this->pathExclude) as $path) {
+            $kinds = PhpClassAstHelper::classifyFile($path);
+            if ($kinds === null || ! ClassKindClassifier::hasKind($kinds, ClassKindClassifier::KIND_MIDDLEWARE)) {
+                continue;
+            }
+            $fqcn = PhpClassAstHelper::fqcnFromFile($path);
             if ($fqcn === null) {
                 continue;
             }
-            $metaByNorm[$this->normalizeFqcn($fqcn)] = ['file' => $file, 'fqcn' => $fqcn];
+            $metaByNorm[$this->normalizeFqcn($fqcn)] = ['file' => new SplFileInfo($path), 'fqcn' => $fqcn];
+        }
+
+        if ($metaByNorm === []) {
+            return [];
         }
 
         $referenced = $this->collectReferencedMiddlewareKeys(array_keys($metaByNorm));
@@ -70,7 +88,7 @@ class MiddlewaresAnalyzer implements AnalyzerInterface
         $hierarchyTargets = ExtendsImplementsAndTraitsIndex::build(
             $this->scanner,
             $this->scanPaths,
-            $this->excludePaths,
+            $this->pathExclude,
         );
 
         $results = [];
@@ -148,7 +166,7 @@ class MiddlewaresAnalyzer implements AnalyzerInterface
 
         $routesDir = base_path('routes');
         if (is_dir($routesDir)) {
-            foreach ($this->scanner->scanDirectory($routesDir) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($routesDir) as $file) {
                 $real = $file->getRealPath();
                 if ($real !== false && ! $this->isExcluded($real)) {
                     yield $real;
@@ -165,7 +183,7 @@ class MiddlewaresAnalyzer implements AnalyzerInterface
                 continue;
             }
 
-            foreach ($this->scanner->scanDirectory($ctrlDir) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($ctrlDir) as $file) {
                 $real = $file->getRealPath();
                 if ($real !== false && ! $this->isExcluded($real)) {
                     yield $real;
@@ -191,86 +209,6 @@ class MiddlewaresAnalyzer implements AnalyzerInterface
         }
     }
 
-    /** @return SplFileInfo[] */
-    private function findMiddlewareFiles(): array
-    {
-        $found = [];
-
-        foreach ($this->scanPaths as $basePath) {
-            $middlewareDir = rtrim($basePath, DIRECTORY_SEPARATOR)
-                . DIRECTORY_SEPARATOR . 'Http'
-                . DIRECTORY_SEPARATOR . 'Middleware';
-
-            if (! is_dir($middlewareDir)) {
-                continue;
-            }
-
-            foreach ($this->scanner->scanDirectory($middlewareDir) as $file) {
-                $real = $file->getRealPath();
-                if ($real === false || $this->isExcluded($real)) {
-                    continue;
-                }
-
-                if ($this->fileHasHandleMethod($file)) {
-                    $found[] = $file;
-                }
-            }
-        }
-
-        return $found;
-    }
-
-    private function fileHasHandleMethod(SplFileInfo $file): bool
-    {
-        $path = $file->getRealPath();
-        if ($path === false) {
-            return false;
-        }
-
-        $stmts = $this->parseStatements($path);
-        if ($stmts === null) {
-            return false;
-        }
-
-        $visitor = new ClassMethodExistsVisitor('handle');
-        $traverser = new NodeTraverser();
-        $traverser->addVisitor($visitor);
-        $traverser->traverse($stmts);
-
-        return $visitor->found();
-    }
-
-    private function extractClassNameFromFile(SplFileInfo $file): ?string
-    {
-        $path = $file->getRealPath();
-        if ($path === false) {
-            return null;
-        }
-
-        $stmts = $this->parseStatements($path);
-        if ($stmts === null) {
-            return null;
-        }
-
-        $namespace = null;
-        foreach ($stmts as $stmt) {
-            if ($stmt instanceof Namespace_) {
-                $namespace = $stmt->name !== null ? $stmt->name->toString() : null;
-                foreach ($stmt->stmts ?? [] as $inner) {
-                    if ($inner instanceof Class_ && $inner->name !== null) {
-                        $class = $inner->name->name;
-
-                        return $namespace !== null && $namespace !== '' ? $namespace . '\\' . $class : $class;
-                    }
-                }
-            } elseif ($stmt instanceof Class_ && $stmt->name !== null) {
-                return $stmt->name->name;
-            }
-        }
-
-        return null;
-    }
-
     private function normalizeFqcn(string $fqcn): string
     {
         return strtolower(ltrim($fqcn, '\\'));
@@ -278,38 +216,7 @@ class MiddlewaresAnalyzer implements AnalyzerInterface
 
     private function isExcluded(string $path): bool
     {
-        foreach ($this->excludePaths as $exclude) {
-            if (str_contains($path, $exclude)) {
-                return true;
-            }
-        }
-
-        return false;
-    }
-}
-
-final class ClassMethodExistsVisitor extends NodeVisitorAbstract
-{
-    private bool $found = false;
-
-    public function __construct(
-        private readonly string $methodName,
-    ) {}
-
-    public function enterNode(Node $node): ?int
-    {
-        if ($node instanceof ClassMethod && $node->name->name === $this->methodName) {
-            $this->found = true;
-
-            return NodeTraverser::DONT_TRAVERSE_CHILDREN;
-        }
-
-        return null;
-    }
-
-    public function found(): bool
-    {
-        return $this->found;
+        return $this->pathExclude->shouldExclude($path);
     }
 }
 
@@ -413,15 +320,53 @@ final class MiddlewareReferenceCollector extends NodeVisitorAbstract
     private function matchArgsForMiddleware(array $args): void
     {
         foreach ($args as $arg) {
-            $v = $arg->value ?? null;
-            if ($v instanceof String_) {
-                $this->matchString($v->value);
-            }
-            if ($v instanceof ClassConstFetch) {
-                $this->matchClassExpr($v->class);
-            }
-            if ($v instanceof StaticCall) {
-                $this->matchClassExpr($v->class);
+            $this->scanExprForMiddleware($arg->value ?? null);
+        }
+    }
+
+    private function scanExprForMiddleware(?Node $v): void
+    {
+        if ($v === null) {
+            return;
+        }
+
+        if ($v instanceof String_) {
+            $this->matchString($v->value);
+
+            return;
+        }
+
+        if ($v instanceof ClassConstFetch) {
+            $this->matchClassExpr($v->class);
+
+            return;
+        }
+
+        if ($v instanceof StaticCall) {
+            $this->matchClassExpr($v->class);
+            $this->matchArgsForMiddleware($v->args);
+
+            return;
+        }
+
+        if ($v instanceof MethodCall) {
+            $this->matchArgsForMiddleware($v->args);
+
+            return;
+        }
+
+        if ($v instanceof New_) {
+            $this->matchClassExpr($v->class);
+
+            return;
+        }
+
+        if ($v instanceof Array_) {
+            foreach ($v->items as $item) {
+                if ($item === null) {
+                    continue;
+                }
+                $this->scanExprForMiddleware($item->value ?? null);
             }
         }
     }

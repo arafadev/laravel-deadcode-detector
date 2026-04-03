@@ -7,9 +7,19 @@ namespace Arafa\DeadcodeDetector\Reporters;
 use Illuminate\Console\OutputStyle;
 use Arafa\DeadcodeDetector\DTOs\DeadCodeResult;
 use Arafa\DeadcodeDetector\Reporters\Contracts\ReporterInterface;
+use Arafa\DeadcodeDetector\Support\DetectionConfidence;
+use Arafa\DeadcodeDetector\Support\FindingFixSuggestion;
 
 class ConsoleReporter implements ReporterInterface
 {
+    private const REASON_MAX_COMPACT = 96;
+
+    private const REASON_MAX_TABLE = 160;
+
+    private const HINT_MAX_TABLE = 72;
+
+    private const NEXT_STEPS_MAX_TABLE = 88;
+
     public function __construct(
         private readonly OutputStyle $output,
         private readonly bool $compact = false,
@@ -22,7 +32,7 @@ class ConsoleReporter implements ReporterInterface
     {
         if ($results === []) {
             $this->output->writeln('');
-            $this->output->writeln('  <fg=green>✅  No dead code detected. Your codebase is clean!</>');
+            $this->output->writeln('  <fg=green>No detailed findings to list — scan summary above shows 0 issues.</>');
             $this->output->writeln('');
 
             return;
@@ -35,10 +45,11 @@ class ConsoleReporter implements ReporterInterface
 
         $this->output->writeln('');
         $this->output->writeln(sprintf(
-            '  <fg=yellow>⚠️  Found <fg=red;options=bold>%d</> NOT USED item(s)</> across <fg=cyan>%d</> categories.',
+            '  <fg=yellow>Details:</> <fg=red;options=bold>%d</> item(s) in <fg=cyan>%d</> categories <fg=gray>(see summary above for confidence totals).</>',
             count($results),
             count($grouped)
         ));
+        $this->output->writeln('  <fg=gray>Row colours:</> <fg=red>NOT USED</> finding · <fg=yellow>MED</> / <fg=white>LOW</> confidence markers in tables below.');
         $this->output->writeln('');
 
         if ($this->compact) {
@@ -49,6 +60,7 @@ class ConsoleReporter implements ReporterInterface
 
         $this->output->writeln('  <fg=gray>Tip:</> long lists are often <fg=yellow>cut off</> in the terminal (scrollback limit).');
         $this->output->writeln('  <fg=gray>Use</> <fg=white>--output=storage/app/deadcode-full.txt</> <fg=gray>(or any path) for the complete plain-text report.</>');
+        $this->output->writeln('  <fg=gray>JSON:</> <fg=white>--format=json</> <fg=gray>includes</> <fg=white>reason</>, <fg=white>fix_suggestions</> <fg=gray>(context + safe actions).</>');
         $this->output->writeln('');
     }
 
@@ -65,11 +77,19 @@ class ConsoleReporter implements ReporterInterface
                 $class  = $r->className ? class_basename($r->className) : '—';
                 $method = $r->methodName ?? '—';
                 $path   = $this->shortenPath($r->filePath);
+                $why    = $this->shortenReason((string) ($r->reason ?? ''), self::REASON_MAX_COMPACT);
+                $hint   = $this->shortenReason(FindingFixSuggestion::contextHint($r), 64);
+                $next   = $this->shortenReason(FindingFixSuggestion::actionsSummaryLine($r), 72);
+                $reason = $why !== '' ? '  <fg=gray>' . $why . '</>' : '';
+                $tail   = $hint !== '' ? sprintf('  <fg=cyan>%s</> <fg=gray>|</> %s', $hint, $next) : '';
                 $this->output->writeln(sprintf(
-                    '    <fg=red>•</> <fg=white>%s</>  <fg=gray>|</> %s  <fg=gray>|</> <fg=yellow>%s</>',
+                    '    <fg=red>•</> <fg=white>%s</>  <fg=gray>|</> %s  <fg=gray>|</> <fg=yellow>%s</>  <fg=gray>|</> %s%s%s',
                     $path,
                     $class,
-                    $method
+                    $method,
+                    $this->confidenceToken($r->confidenceLevel),
+                    $reason,
+                    $tail !== '' ? '  ' . $tail : ''
                 ));
             }
 
@@ -98,18 +118,32 @@ class ConsoleReporter implements ReporterInterface
                 $r->className ? '<fg=cyan>' . class_basename($r->className) . '</>' : '<fg=gray>—</>',
                 $r->methodName ? '<fg=yellow>' . $r->methodName . '</>' : '<fg=gray>—</>',
                 '<fg=gray>' . $r->lastModified . '</>',
+                $this->confidenceToken($r->confidenceLevel),
+                '<fg=cyan>' . $this->shortenReason(FindingFixSuggestion::contextHint($r), self::HINT_MAX_TABLE) . '</>',
+                '<fg=gray>' . $this->shortenReason((string) ($r->reason ?? ''), self::REASON_MAX_TABLE) . '</>',
+                '<fg=green>' . $this->shortenReason(FindingFixSuggestion::actionsSummaryLine($r), self::NEXT_STEPS_MAX_TABLE) . '</>',
                 $r->isSafeToDelete
                     ? '<fg=green>✓ Yes</>'
                     : '<fg=red>✗ No</>',
             ], $items);
 
             $this->output->table(
-                ['Status', 'File', 'Class', 'Method / Helper / Route', 'Last Modified', 'Safe to Delete'],
+                ['Status', 'File', 'Class', 'Method / helper / route', 'Modified', 'Confidence', 'Context hint', 'Why (short)', 'Next steps', 'Safe delete'],
                 $rows
             );
 
             $this->output->writeln('');
         }
+    }
+
+    private function confidenceToken(string $level): string
+    {
+        return match ($level) {
+            DetectionConfidence::HIGH => '<fg=cyan;options=bold>HIGH</>',
+            DetectionConfidence::MEDIUM => '<fg=yellow;options=bold>MED</>',
+            DetectionConfidence::LOW => '<fg=white;options=bold>LOW</>',
+            default => '<fg=gray>' . $level . '</>',
+        };
     }
 
     private function typeLabel(string $type): string
@@ -124,18 +158,51 @@ class ConsoleReporter implements ReporterInterface
             'route'             => 'ROUTE NAME (not referenced)',
             'middleware'        => 'MIDDLEWARE (not used)',
             'migration'         => 'MIGRATION (issue)',
+            'event'             => 'EVENT (unused / missing)',
+            'listener'          => 'LISTENER (unused / missing)',
+            'binding'           => 'CONTAINER BINDING (issue)',
+            'job'               => 'JOB (never dispatched)',
+            'observer'          => 'OBSERVER (not registered / missing)',
+            'request'           => 'FORM REQUEST (not type-hinted)',
+            'resource'          => 'API RESOURCE (not used)',
+            'policy'            => 'POLICY (not used)',
+            'action'            => 'ACTION (not used)',
+            'service'           => 'SERVICE (not used)',
+            'command'           => 'ARTISAN COMMAND (not registered)',
+            'notification'      => 'NOTIFICATION (not sent)',
+            'mailable'          => 'MAILABLE (not sent)',
+            'rule'              => 'VALIDATION RULE (not used)',
+            'enum'              => 'ENUM (not referenced)',
             default             => strtoupper($type),
         };
     }
 
     private function shortenPath(string $path): string
     {
-        $base = base_path();
-        $relative = str_replace($base . DIRECTORY_SEPARATOR, '', $path);
+        $base = function_exists('base_path') ? base_path() : '';
+        if ($base !== '' && str_starts_with($path, $base)) {
+            $relative = substr($path, strlen($base) + 1);
+        } else {
+            $relative = $path;
+        }
+
         if (strlen($relative) > 50) {
             return '…' . substr($relative, -49);
         }
 
         return $relative;
+    }
+
+    private function shortenReason(string $reason, int $maxLen): string
+    {
+        $reason = trim(preg_replace('/\s+/', ' ', $reason) ?? $reason);
+        if ($reason === '') {
+            return '';
+        }
+        if (strlen($reason) > $maxLen) {
+            return substr($reason, 0, $maxLen - 1) . '…';
+        }
+
+        return $reason;
     }
 }

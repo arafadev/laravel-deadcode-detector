@@ -6,6 +6,7 @@ namespace Arafa\DeadcodeDetector\Support;
 
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
+use RecursiveCallbackFilterIterator;
 use RecursiveDirectoryIterator;
 use RecursiveIteratorIterator;
 use SplFileInfo;
@@ -14,8 +15,10 @@ final class PhpFileScanner
 {
     private LoggerInterface $logger;
 
-    public function __construct(?LoggerInterface $logger = null)
-    {
+    public function __construct(
+        ?LoggerInterface $logger = null,
+        private readonly ?PathExcludeMatcher $excludeMatcher = null,
+    ) {
         $this->logger = $logger ?? new NullLogger();
     }
 
@@ -23,9 +26,21 @@ final class PhpFileScanner
      * Scan a single directory recursively and return only .php SplFileInfo objects.
      * Non-existent or unreadable directories are skipped with a warning.
      *
+     * Excluded directories are pruned during traversal (no recursion into vendor, etc.).
+     *
      * @return SplFileInfo[]
      */
     public function scanDirectory(string $path): array
+    {
+        return iterator_to_array($this->scanDirectoryLazy($path), false);
+    }
+
+    /**
+     * Same as {@see scanDirectory} but streams results to keep memory flat on huge trees.
+     *
+     * @return \Generator<int, SplFileInfo>
+     */
+    public function scanDirectoryLazy(string $path): \Generator
     {
         if (! is_dir($path)) {
             $this->logger->warning(
@@ -33,16 +48,25 @@ final class PhpFileScanner
                 ['path' => $path]
             );
 
-            return [];
+            return;
         }
-
-        $results = [];
 
         $flags = RecursiveDirectoryIterator::SKIP_DOTS
                | RecursiveDirectoryIterator::FOLLOW_SYMLINKS;
 
         $directoryIterator = new RecursiveDirectoryIterator($path, $flags);
-        $iterator          = new RecursiveIteratorIterator(
+
+        if ($this->excludeMatcher !== null) {
+            $matcher = $this->excludeMatcher;
+            $directoryIterator = new RecursiveCallbackFilterIterator(
+                $directoryIterator,
+                static function (\SplFileInfo $current) use ($matcher): bool {
+                    return ! $matcher->shouldExclude($current->getPathname());
+                }
+            );
+        }
+
+        $iterator = new RecursiveIteratorIterator(
             $directoryIterator,
             RecursiveIteratorIterator::SELF_FIRST
         );
@@ -57,11 +81,8 @@ final class PhpFileScanner
                 continue;
             }
 
-            // We intentionally do NOT load file contents here for performance.
-            $results[] = $file;
+            yield $file;
         }
-
-        return $results;
     }
 
     /**
@@ -77,7 +98,7 @@ final class PhpFileScanner
         $results = [];
 
         foreach ($paths as $path) {
-            foreach ($this->scanDirectory($path) as $file) {
+            foreach ($this->scanDirectoryLazy($path) as $file) {
                 $realPath = $file->getRealPath();
 
                 if ($realPath === false || isset($seen[$realPath])) {

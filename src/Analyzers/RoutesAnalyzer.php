@@ -19,15 +19,33 @@ use SplFileInfo;
 use Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface;
 use Arafa\DeadcodeDetector\DTOs\DeadCodeResult;
 use Arafa\DeadcodeDetector\Support\AstParserFactory;
+use Arafa\DeadcodeDetector\Support\FrontendAssetScanner;
 use Arafa\DeadcodeDetector\Support\PhpFileScanner;
+use Arafa\DeadcodeDetector\Support\PathExcludeMatcher;
 
 class RoutesAnalyzer implements AnalyzerInterface
 {
     public function __construct(
         private readonly PhpFileScanner $scanner,
         private readonly array $scanPaths,
-        private readonly array $excludePaths = [],
+        private readonly PathExcludeMatcher $pathExclude,
     ) {}
+
+    /**
+     * @return list<string>
+     */
+    public static function defaultScanPaths(): array
+    {
+        $paths = [];
+        if (function_exists('base_path')) {
+            $paths[] = base_path('routes');
+        }
+        if (function_exists('app_path')) {
+            $paths[] = app_path();
+        }
+
+        return $paths;
+    }
 
     public function getName(): string
     {
@@ -129,7 +147,64 @@ class RoutesAnalyzer implements AnalyzerInterface
             $this->collectRouteNamesFromBlade($path, $used);
         }
 
+        $this->collectRouteNamesFromFrontendAssets($used);
+
         return $used;
+    }
+
+    /**
+     * Ziggy / Laravel route helper usage inside JS, TS, Vue, etc.
+     *
+     * @param array<string, true> $used
+     */
+    private function collectRouteNamesFromFrontendAssets(array &$used): void
+    {
+        $roots = $this->scanPaths;
+        if (function_exists('resource_path')) {
+            $res = resource_path();
+            if ($res !== '' && ! in_array($res, $roots, true)) {
+                $roots[] = $res;
+            }
+        }
+        if (function_exists('base_path')) {
+            $pub = base_path('public');
+            if (is_dir($pub) && ! in_array($pub, $roots, true)) {
+                $roots[] = $pub;
+            }
+        }
+
+        foreach ($roots as $root) {
+            if ($root === '' || $root === false) {
+                continue;
+            }
+            foreach (FrontendAssetScanner::iterateFiles((string) $root, $this->pathExclude) as $path) {
+                $this->collectRouteNamesFromTextFile($path, $used);
+            }
+        }
+    }
+
+    /**
+     * @param array<string, true> $used
+     */
+    private function collectRouteNamesFromTextFile(string $path, array &$used): void
+    {
+        $content = @file_get_contents($path);
+        if ($content === false || $content === '') {
+            return;
+        }
+
+        $patterns = [
+            '/\broute\s*\(\s*[\'"]([^\'"]+)[\'"]/',
+            '/\bwindow\.route\s*\(\s*[\'"]([^\'"]+)[\'"]/',
+        ];
+
+        foreach ($patterns as $pattern) {
+            if (preg_match_all($pattern, $content, $m)) {
+                foreach ($m[1] as $name) {
+                    $used[(string) $name] = true;
+                }
+            }
+        }
     }
 
     /**
@@ -138,7 +213,7 @@ class RoutesAnalyzer implements AnalyzerInterface
     private function iteratePhpSourcesForRouteUsage(): \Generator
     {
         foreach ($this->scanPaths as $basePath) {
-            foreach ($this->scanner->scanDirectory($basePath) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($basePath) as $file) {
                 $real = $file->getRealPath();
                 if ($real !== false && ! $this->isExcluded($real)) {
                     yield $real;
@@ -148,7 +223,7 @@ class RoutesAnalyzer implements AnalyzerInterface
 
         $routesDir = base_path('routes');
         if (is_dir($routesDir)) {
-            foreach ($this->scanner->scanDirectory($routesDir) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($routesDir) as $file) {
                 $real = $file->getRealPath();
                 if ($real !== false && ! $this->isExcluded($real)) {
                     yield $real;
@@ -237,18 +312,12 @@ class RoutesAnalyzer implements AnalyzerInterface
             return [];
         }
 
-        return $this->scanner->scanDirectory($routesDir);
+        return iterator_to_array($this->scanner->scanDirectoryLazy($routesDir), false);
     }
 
     private function isExcluded(string $path): bool
     {
-        foreach ($this->excludePaths as $exclude) {
-            if (str_contains($path, $exclude)) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->pathExclude->shouldExclude($path);
     }
 }
 

@@ -7,7 +7,6 @@ namespace Arafa\DeadcodeDetector\Support;
 use PhpParser\Node;
 use PhpParser\Node\Expr\Array_;
 use PhpParser\Node\Expr\ClassConstFetch;
-use PhpParser\Node\Expr\MethodCall;
 use PhpParser\Node\Expr\StaticCall;
 use PhpParser\Node\Identifier;
 use PhpParser\Node\Name;
@@ -15,17 +14,23 @@ use PhpParser\Node\Name\FullyQualified;
 use PhpParser\Node\Scalar\String_;
 use PhpParser\NodeVisitorAbstract;
 
-/** Collects (controller FQCN, action method) pairs from route definitions. */
+/**
+ * Collects (controller FQCN, action method) pairs from route definitions.
+ *
+ * When routes use a short class name ("CartController@index"), every controller class
+ * with that basename is marked (avoids false positives when multiple namespaces define
+ * the same short name).
+ */
 final class ControllerRouteActionExtractor extends NodeVisitorAbstract
 {
     /** @var array<string, true> key: strtolower(fqcn)::method */
     private array $used = [];
 
     /**
-     * @param array<string, string> $shortBasenameToFqcn Lowercased short class name => FQCN
+     * @param array<string, list<string>> $shortBasenameToFqcns lowercased class basename => FQCNs
      */
     public function __construct(
-        private readonly array $shortBasenameToFqcn,
+        private readonly array $shortBasenameToFqcns,
     ) {}
 
     /**
@@ -45,9 +50,8 @@ final class ControllerRouteActionExtractor extends NodeVisitorAbstract
                 if (isset($node->args[1])) {
                     $action = $node->args[1]->value ?? null;
                     if ($action instanceof ClassConstFetch) {
-                        $fqcn = $this->classExprToFqcn($action->class);
-                        if ($fqcn !== null) {
-                            $this->used[strtolower(ltrim($fqcn, '\\')) . '::__invoke'] = true;
+                        foreach ($this->normalizedFqcnKeysFromClassExpr($action->class) as $key) {
+                            $this->used[$key . '::__invoke'] = true;
                         }
                     }
                 }
@@ -81,8 +85,14 @@ final class ControllerRouteActionExtractor extends NodeVisitorAbstract
             return;
         }
 
-        $fqcn = $this->classExprToFqcn($node->args[1]->value ?? null);
-        if ($fqcn === null) {
+        $secondArg = $node->args[1]->value ?? null;
+        if (! $secondArg instanceof ClassConstFetch) {
+            return;
+        }
+
+        $keys = $this->normalizedFqcnKeysFromClassExpr($secondArg->class);
+
+        if ($keys === []) {
             return;
         }
 
@@ -90,9 +100,10 @@ final class ControllerRouteActionExtractor extends NodeVisitorAbstract
             ? ['index', 'store', 'show', 'update', 'destroy']
             : ['index', 'create', 'store', 'show', 'edit', 'update', 'destroy'];
 
-        $key = strtolower(ltrim($fqcn, '\\'));
-        foreach ($actions as $a) {
-            $this->used[$key . '::' . $a] = true;
+        foreach ($keys as $key) {
+            foreach ($actions as $a) {
+                $this->used[$key . '::' . strtolower($a)] = true;
+            }
         }
     }
 
@@ -102,19 +113,16 @@ final class ControllerRouteActionExtractor extends NodeVisitorAbstract
             return;
         }
 
-        [$classPart, $method] = explode('@', $value, 2);
+        [$classPart, $action] = explode('@', $value, 2);
         $classPart = trim($classPart);
-        $method    = trim($method);
-        if ($classPart === '' || $method === '') {
+        $action    = trim($action);
+        if ($classPart === '' || $action === '') {
             return;
         }
 
-        $fqcn = $this->resolveClassString($classPart);
-        if ($fqcn === null) {
-            return;
+        foreach ($this->normalizedFqcnKeysFromRouteClassPart($classPart) as $key) {
+            $this->used[$key . '::' . strtolower($action)] = true;
         }
-
-        $this->used[strtolower(ltrim($fqcn, '\\')) . '::' . strtolower($method)] = true;
     }
 
     private function collectFromArrayTuple(Array_ $node): void
@@ -126,46 +134,75 @@ final class ControllerRouteActionExtractor extends NodeVisitorAbstract
         $first  = $node->items[0]->value ?? null;
         $second = $node->items[1]->value ?? null;
 
-        if ($first instanceof ClassConstFetch) {
-            $fqcn = $this->classExprToFqcn($first->class);
-            if ($fqcn === null) {
-                return;
-            }
-
-            if ($second instanceof String_) {
-                $m = $second->value;
-                if ($m !== '') {
-                    $this->used[strtolower(ltrim($fqcn, '\\')) . '::' . strtolower($m)] = true;
-                }
-            }
-
+        if (! $first instanceof ClassConstFetch) {
             return;
         }
 
-        // Invokable: [Something::class] only — handled elsewhere via ClassConstFetch as sole action
-    }
-
-    private function resolveClassString(string $classPart): ?string
-    {
-        if (str_contains($classPart, '\\')) {
-            return ltrim($classPart, '\\');
+        $keys = $this->normalizedFqcnKeysFromClassExpr($first->class);
+        if ($keys === []) {
+            return;
         }
 
-        $key = strtolower($classPart);
-
-        return $this->shortBasenameToFqcn[$key] ?? null;
+        if ($second instanceof String_) {
+            $m = trim($second->value);
+            if ($m !== '') {
+                foreach ($keys as $key) {
+                    $this->used[$key . '::' . strtolower($m)] = true;
+                }
+            }
+        }
     }
 
-    private function classExprToFqcn(?Node $expr): ?string
+    /**
+     * Route string may be "App\Http\Foo\BarController" or short "BarController".
+     *
+     * @return list<string> normalized FQCN keys (lowercase, no leading \)
+     */
+    private function normalizedFqcnKeysFromRouteClassPart(string $classPart): array
     {
+        $classPart = ltrim($classPart, '\\');
+        if (str_contains($classPart, '\\')) {
+            return [strtolower($classPart)];
+        }
+
+        return $this->normalizedFqcnKeysForShortBasename($classPart);
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function normalizedFqcnKeysForShortBasename(string $basename): array
+    {
+        $keys = [];
+        foreach ($this->shortBasenameToFqcns[strtolower($basename)] ?? [] as $fqcn) {
+            $keys[] = strtolower(ltrim($fqcn, '\\'));
+        }
+
+        return $keys;
+    }
+
+    /**
+     * @return list<string>
+     */
+    private function normalizedFqcnKeysFromClassExpr(?Name $expr): array
+    {
+        if ($expr === null) {
+            return [];
+        }
+
         if ($expr instanceof FullyQualified) {
-            return $expr->toString();
+            return [strtolower(ltrim($expr->toString(), '\\'))];
         }
 
         if ($expr instanceof Name) {
-            return $expr->toString();
+            $ref = $expr->toString();
+            if (str_contains($ref, '\\')) {
+                return [strtolower(ltrim($ref, '\\'))];
+            }
+
+            return $this->normalizedFqcnKeysForShortBasename($ref);
         }
 
-        return null;
+        return [];
     }
 }

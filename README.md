@@ -1,31 +1,35 @@
-# laravel-deadcode-detector 🧹🔎
+# Laravel Dead Code Detector
 
-Detect and report dead / unused code in your Laravel applications — controllers,
-models, views, routes, middleware, migrations, and more.
+Static analysis for Laravel applications. It scans PHP and Blade under configurable roots, combines per-analyzer logic with cross-file signals (including a dependency graph), and reports **possible** unused code: controllers, models, views, named routes, middleware, migrations, jobs, service bindings, and many other Laravel-oriented categories.
 
----
-
-## Requirements 🧰
-
-| Laravel | PHP         |
-|---------|-------------|
-| 8.x     | 8.0 – 8.3   |
-| 9.x     | 8.0 – 8.3   |
-| 10.x    | 8.1 – 8.3   |
-| 11.x    | 8.2 – 8.3   |
-| 12.x    | 8.2 – 8.3   |
+**Findings are hints, not proof.** Each row includes a **reason**, **confidence** (high / medium / low), and **fix suggestions** (review first, when deletion might be reasonable, and how to ignore safely). Always use tests, review, and version control before removing anything.
 
 ---
 
-## Installation 🚀
+## Requirements
+
+- **PHP:** `^8.0` (`composer.json`).
+- **Illuminate** (`support`, `console`, `contracts`): `^8.0` … `^12.0`.
+
+Typical Laravel PHP floors:
+
+| Laravel     | PHP (usual minimum) |
+|-------------|---------------------|
+| 8.x – 9.x   | 8.0+                |
+| 10.x        | 8.1+                |
+| 11.x – 12.x | 8.2+                |
+
+---
+
+## Installation
 
 ```bash
 composer require arafa/laravel-deadcode-detector
 ```
 
-The service provider is auto-discovered. No manual registration needed.
+The package registers via Laravel’s auto-discovery (`extra.laravel.providers`).
 
-### Publish the config file
+Publish the configuration:
 
 ```bash
 php artisan vendor:publish --tag=deadcode-config
@@ -33,129 +37,145 @@ php artisan vendor:publish --tag=deadcode-config
 
 ---
 
-## Usage 🔍
+## Quick start
 
 ```bash
-# Detailed table output (default)
-php artisan dead:scan --details
+php artisan dead:scan
+```
 
-# Show one line per finding (less scrolling)
-php artisan dead:scan --compact
+You get analyzer progress (by default a progress bar at normal verbosity), a **console report** (tables or `--compact` one-liners), a line summarizing **config/inline ignores** when applicable, optional **file export**, and a **closing summary** (including counts by confidence).
 
-# Save the full report to a text file (recommended for big projects)
-php artisan dead:scan --output=storage/app/deadcode-full.txt
-
-# With --output, skip tables in the terminal (only counts + file path)
-php artisan dead:scan --output=storage/app/deadcode-full.txt --only-summary
-
-# JSON output (pipe-friendly). Use this when you want JSON only.
-php artisan dead:scan --format=json > report.json
-
-# Interactive mode – confirm before marking files
-php artisan dead:scan --interactive
+```bash
+php artisan dead:scan -v    # list each analyzer without the progress bar
+php artisan dead:scan -q   # quieter output
 ```
 
 ---
 
-## Configuration
+## Command: `dead:scan`
 
-After publishing, edit `config/deadcode.php`:
+| Option | Description |
+|--------|-------------|
+| `--format=console` | Human-readable report (default). |
+| `--format=json` | Emit a single JSON document on stdout (do not mix with normal table output). |
+| `--output=path` | Write a report file. If the path ends in `.json`, writes the same structured JSON as `--format=json`. Otherwise writes UTF-8 **plain text** with full fields (no terminal truncation). |
+| `--only-summary` | With `--output`, skip large console tables (short message + path to the saved report). |
+| `--compact` | One line per finding in the console tables. |
+| `--interactive` | After the scan summary (**console + interactive TTY only**): for each finding choose **Delete** (double-confirmed; safe paths only), **Ignore** (prepend `// @deadcode-ignore` or Blade `{{-- @deadcode-ignore --}}`), or **Skip** (default). Ignored when `--format=json`. |
+| `-v` / `-vv` | Verbose analyzer output. |
+| `-q` | Quiet. |
 
-```php
-return [
-    // Toggle built-in analyzers on/off, or replace with a custom FQCN
-    'analyzers' => [
-        'controllers' => true,
-        'models'      => true,
-        'views'       => true,
-        'routes'      => true,
-        'middlewares' => true,
-        'migrations'  => true,
-    ],
-
-    // Register your own analyzers
-    'custom_analyzers' => [
-        \App\DeadCode\UnusedJobsAnalyzer::class,
-    ],
-
-    // Directories to scan (defaults to app/ and resources/views)
-    'scan_paths' => [
-        app_path(),
-        resource_path('views'),
-    ],
-
-    // Glob patterns to exclude
-    'exclude_paths' => [
-        'tests',
-    ],
-];
-```
+`--details` is kept for compatibility; detailed console output is already the default.
 
 ---
 
-## Registering a Custom Analyzer
+## Reports and outputs
 
-Implement `AnalyzerInterface`:
+### Console
 
-```php
-use Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface;
-use Arafa\DeadcodeDetector\DTOs\DeadCodeResult;
+- Tables (or compact lines) with file, class, method/symbol, modification time, confidence, **context hint**, **why**, **next steps**, and “safe to delete” flag when the analyzer sets it.
+- If `config/deadcode.php` `ignore` or inline `@deadcode-ignore` removed items, a short line reports how many findings were hidden.
 
-class UnusedJobsAnalyzer implements AnalyzerInterface
-{
-    public function getName(): string        { return 'unused-jobs'; }
-    public function getDescription(): string { return 'Finds job classes never dispatched.'; }
+### JSON (`--format=json` or `--output=…json`)
 
-    public function analyze(): array
-    {
-        // ... your logic ...
-        return [
-            DeadCodeResult::fromArray([
-                'analyzerName' => $this->getName(),
-                'type'         => 'job',
-                'filePath'     => '/path/to/SendWelcomeEmail.php',
-                'className'    => 'App\Jobs\SendWelcomeEmail',
-            ]),
-        ];
-    }
-}
-```
+Built by `ReportPayloadBuilder` (`schema_version: 1`):
 
-Then add it to `config/deadcode.php`:
+- `generated_at`, `summary` (`total_findings`, `by_type`, `by_confidence`, `confidence_legend`, optional `php_files_in_scope`)
+- `findings`: list of `DeadCodeResult::toArray()` rows
+- `by_type`: the same rows grouped by `type`
 
-```php
-'custom_analyzers' => [
-    \App\DeadCode\UnusedJobsAnalyzer::class,
-],
-```
+Each finding includes `file_path`, `type`, `reason` / `why`, `confidence_level`, `confidence_hint`, class/method/analyzer metadata, `is_safe_to_delete`, and **`fix_suggestions`** (`context_hint` + `actions` with review/delete/ignore text).
+
+### Plain text (`--output=report.txt`)
+
+Same information as JSON in a readable, non-truncated textual form.
 
 ---
 
-## Architecture
+## Confidence and false positives
 
-```
-src/
-├── Analyzers/Contracts/AnalyzerInterface.php   – contract every analyzer must satisfy
-├── Reporters/Contracts/ReporterInterface.php   – contract for output formatters
-├── Commands/DeadScanCommand.php                – artisan dead:scan entry point
-├── Support/PhpFileScanner.php                  – recursive PHP file discovery
-├── DTOs/DeadCodeResult.php                     – immutable value object for findings
-└── DeadCodeServiceProvider.php                 – service provider / bootstrapper
-config/
-└── deadcode.php                                – user-facing configuration
-```
+- **Confidence** = strength of the **static** signal, not “OK to delete.”
+- Dynamic Laravel usage (container resolution, config-driven class names, reflection, code outside scan roots) can lower confidence or trigger “possible dynamic” explanations.
+- Tune noise with **`ignore`** (post-analysis filter), **`@deadcode-ignore`** in the file, or **`exclude_paths`** (skip traversing paths entirely).
 
-### Design principles
+### `exclude_paths` vs `ignore`
 
-- **No facades** inside the package core — dependencies are injected via the container.
-- **Analyzer failures are isolated** — one broken analyzer never stops the rest.
-- **Lazy file iteration** — `PhpFileScanner` yields `SplFileInfo` objects without
-  loading file contents into memory.
-- **SOLID** — each class has a single responsibility; analyzers and reporters are
-  interchangeable via interfaces.
+| Mechanism | Effect |
+|-----------|--------|
+| `exclude_paths` (+ built-in excludes) | Files under those paths are **not walked**; they are invisible to the graph. |
+| `ignore` (classes / folders / patterns) | Files are still part of analysis; matching **findings are removed** from the report so other items stay accurate. |
 
 ---
 
-## License 📄
+## Inline ignore (file-wide)
+
+Recognized in sources (see `DeadcodeResultIgnoreFilter`):
+
+- **PHP:** `// @deadcode-ignore` or `# …`, or the tag inside a block/doc comment near the top.
+- **Blade:** `{{-- @deadcode-ignore --}}`
+
+Applies to the **whole file** for reporting. Optional **interactive “Ignore”** uses `DeadcodeInlineIgnoreMarker` to insert this for `.php` / `.blade.php`.
+
+---
+
+## Configuration highlights (`config/deadcode.php`)
+
+| Key | Role |
+|-----|------|
+| `auto_discover` | Discover `app/`, children of `app`, `routes`, `bootstrap`, `resources`, `config`, `database`, optional `src/`, and PSR-4 paths from `composer.json`. |
+| `analyzers` | Toggle built-ins or set a replacement **FQCN** per key. |
+| `analyzer_paths` | Override/extend scan roots **per analyzer** (global roots still merge in). |
+| `helper_paths` | Extra roots for helpers. |
+| `paths.extra` / `scan_paths` | Additional global roots. |
+| `exclude_builtin` / `exclude_paths` | Path pruning (`fnmatch` supported on user entries). |
+| `ignore` | `classes`, `folders`, `patterns` — strip findings after analysis. |
+| `cache` | AST cache under storage (`DEADCODE_CACHE`, `DEADCODE_CACHE_STAT`, etc.). |
+| `custom_analyzers` | Extra `AnalyzerInterface` classes. |
+
+Full behavior is documented in the published config file comments.
+
+---
+
+## Built-in analyzer keys
+
+`controllers`, `models`, `views`, `routes`, `middlewares`, `migrations`, `helpers`, `requests`, `resources`, `policies`, `actions`, `services`, `commands`, `notifications`, `mailables`, `rules`, `enums`, `jobs`, `events`, `listeners`, `observers`, `service_bindings`.
+
+---
+
+## Custom analyzers
+
+Implement `Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface`: `getName()`, `getDescription()`, `analyze()` returning a list of `DeadCodeResult` (typically `DeadCodeResult::fromArray([...])` with optional `reason`, `confidenceLevel`, `isSafeToDelete`, `possibleDynamicHint`, etc.).
+
+Register under `custom_analyzers`. The provider injects `PhpFileScanner`, merged paths, and `PathExcludeMatcher`.
+
+---
+
+## Interactive cleanup
+
+- **Delete:** Not offered for types tied to **shared files** (`route`, `binding`). Otherwise only files **under `base_path()`**, not under `vendor`, `node_modules`, `storage`, `bootstrap/cache`, or `.git`, with **two** `no`-default confirmations before `unlink`. Extra warning when the finding may refer to only part of a file (`controller_method`, `model_scope`, `helper`).
+- **Ignore:** Prepends the standard marker when the file is writable `.php` / `.blade.php`.
+- **Skip:** No changes.
+
+Requires an interactive terminal (`InputInterface::isInteractive()`).
+
+---
+
+## Architecture (overview)
+
+| Piece | Responsibility |
+|-------|------------------|
+| `DeadScanCommand` | Runs analyzers, applies user ignore filter, writes exports, reporters, optional interactive workflow. |
+| `Analyzers/*` | Per-domain dead/unused detection. |
+| `Support/DependencyGraphEngine`, `ProjectPhpIterator`, `PathExcludeMatcher` | Graph + filesystem iteration. |
+| `DeadcodeResultIgnoreFilter`, `DeadcodeInlineIgnoreMarker` | Config/inline suppression and interactive marker insertion. |
+| `InteractiveDeadcodeWorkflow` | Delete / ignore / skip prompts. |
+| `ReportPayloadBuilder`, `PlainTextReportWriter`, `ConsoleReporter`, `JsonReporter` | Outputs. |
+| `DeadCodeResult`, `FindingFixSuggestion`, `DetectionConfidence` | Finding model, export shape, suggestions, confidence. |
+
+One failed analyzer does not stop the rest; failures are summarized at the end of the command.
+
+---
+
+## License
 
 MIT

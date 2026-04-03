@@ -18,6 +18,7 @@ use SplFileInfo;
 use Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface;
 use Arafa\DeadcodeDetector\DTOs\DeadCodeResult;
 use Arafa\DeadcodeDetector\Support\AstParserFactory;
+use Arafa\DeadcodeDetector\Support\PathExcludeMatcher;
 use Arafa\DeadcodeDetector\Support\PhpFileScanner;
 
 /**
@@ -26,16 +27,23 @@ use Arafa\DeadcodeDetector\Support\PhpFileScanner;
 class HelpersAnalyzer implements AnalyzerInterface
 {
     /**
-     * @param list<string>          $scanPaths
-     * @param list<string>          $excludePaths
+     * @param list<string> $scanPaths
      * @param list<string> $helperFilePaths Absolute paths to PHP files that define helpers (merged with composer autoload files)
      */
     public function __construct(
         private readonly PhpFileScanner $scanner,
         private readonly array $scanPaths,
-        private readonly array $excludePaths,
+        private readonly PathExcludeMatcher $pathExclude,
         private readonly array $helperFilePaths = [],
     ) {}
+
+    /**
+     * @return list<string>
+     */
+    public static function defaultScanPaths(): array
+    {
+        return function_exists('app_path') ? [app_path()] : [];
+    }
 
     public function getName(): string
     {
@@ -183,7 +191,7 @@ class HelpersAnalyzer implements AnalyzerInterface
     private function iterateAllPhpForCallScan(): \Generator
     {
         foreach ($this->scanPaths as $basePath) {
-            foreach ($this->scanner->scanDirectory($basePath) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($basePath) as $file) {
                 $real = $file->getRealPath();
                 if ($real === false || $this->isExcluded($real)) {
                     continue;
@@ -197,7 +205,7 @@ class HelpersAnalyzer implements AnalyzerInterface
             if (! is_dir($dirPath)) {
                 continue;
             }
-            foreach ($this->scanner->scanDirectory($dirPath) as $file) {
+            foreach ($this->scanner->scanDirectoryLazy($dirPath) as $file) {
                 $real = $file->getRealPath();
                 if ($real === false || $this->isExcluded($real)) {
                     continue;
@@ -226,13 +234,7 @@ class HelpersAnalyzer implements AnalyzerInterface
 
     private function isExcluded(string $path): bool
     {
-        foreach ($this->excludePaths as $exclude) {
-            if (str_contains($path, $exclude)) {
-                return true;
-            }
-        }
-
-        return false;
+        return $this->pathExclude->shouldExclude($path);
     }
 }
 

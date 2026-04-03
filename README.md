@@ -2,7 +2,7 @@
 
 Static analysis for Laravel applications. It scans PHP and Blade under configurable roots, combines per-analyzer logic with cross-file signals (including a dependency graph), and reports **possible** unused code: controllers, models, views, named routes, middleware, migrations, jobs, service bindings, and many other Laravel-oriented categories.
 
-**Findings are hints, not proof.** Each row includes a **reason**, **confidence** (high / medium / low), and **fix suggestions** (review first, when deletion might be reasonable, and how to ignore safely). Always use tests, review, and version control before removing anything.
+**Findings are hints, not proof.** The default terminal view is a short **3-column** table; **`--details`**, **`--output`**, and **JSON** include **reason**, **confidence** (high / medium / low), and **fix suggestions** where applicable. Always use tests, review, and version control before removing anything.
 
 ---
 
@@ -58,14 +58,15 @@ php artisan dead:scan -q   # quieter output
 |--------|-------------|
 | `--format=console` | Human-readable report (default). |
 | `--format=json` | Emit a single JSON document on stdout (do not mix with normal table output). |
-| `--output=path` | Write a report file. If the path ends in `.json`, writes the same structured JSON as `--format=json`. Otherwise writes UTF-8 **plain text** with full fields (no terminal truncation). |
+| `--output=path` | Write a report file. If the path ends in `.json`, writes the same structured JSON as `--format=json`. Otherwise writes UTF-8 **plain text** (narrative report; no terminal truncation). |
 | `--only-summary` | With `--output`, skip large console tables (short message + path to the saved report). |
-| `--compact` | One line per finding in the console tables. |
+| `--compact` | One line per finding in the console (`file \| type \| location`). |
+| `--details` | Wider console table: class, method/symbol, modified time, confidence, short “why” (default stays at three columns). |
 | `--interactive` | After the scan summary (**console + interactive TTY only**): for each finding choose **Delete** (double-confirmed; safe paths only), **Ignore** (prepend `// @deadcode-ignore` or Blade `{{-- @deadcode-ignore --}}`), or **Skip** (default). Ignored when `--format=json`. |
 | `-v` / `-vv` | Verbose analyzer output. |
 | `-q` | Quiet. |
 
-`--details` prints a wider console table (more columns). The default console layout is a **3-column** table (`Type`, `File`, `Location`) so narrow terminals stay readable.
+The default console layout is **`Type` · `File` · `Location`** so narrow terminals stay readable; the **“safe to delete”** column is not printed in the console (use JSON / export if you need `is_safe_to_delete`).
 
 ---
 
@@ -73,7 +74,7 @@ php artisan dead:scan -q   # quieter output
 
 ### Console
 
-- **Default:** small table per category — `Type`, `File`, `Location` (class, or `Class::method`). **`--details`** adds class, method, modified time, confidence, and a short “why”. **`--compact`** = one line per finding (`file | type | location`). Use **`--output=…txt`** for the full plain-text report (why, context, suggested actions). JSON still includes every field (e.g. `is_safe_to_delete`) for tooling.
+- **Default:** small table per category — `Type`, `File`, `Location` (class, or `Class::method`). **`--details`** adds class, method, modified time, confidence, and a short “why”. **`--compact`** = one line per finding. Use **`--output=…txt`** for the full plain-text report (why, context, suggested actions). JSON includes every structured field (e.g. `is_safe_to_delete`) for tooling.
 - If `config/deadcode.php` `ignore` or inline `@deadcode-ignore` removed items, a short line reports how many findings were hidden.
 
 ### JSON (`--format=json` or `--output=…json`)
@@ -88,7 +89,7 @@ Each finding includes `file_path`, `type`, `reason` / `why`, `confidence_level`,
 
 ### Plain text (`--output=report.txt` / e.g. `storage/app/deadcode-full.txt`)
 
-Same fields as JSON in a **UTF-8** report with spacing, box drawing, and emoji section cues (easy to skim in an editor).
+Structured like JSON in narrative form: **UTF-8** report with spacing, box drawing, and emoji section cues. The boxed “safe to delete” line is omitted there too (redundant with JSON and awkward in narrow editors); use **`--output=…json`** when you need that flag in the export.
 
 ---
 
@@ -100,7 +101,15 @@ Same fields as JSON in a **UTF-8** report with spacing, box drawing, and emoji s
 
 ### Events analyzer — what counts as “dispatched”
 
-Scanned PHP is checked for typical dispatch patterns, including **`event(...)`**, **`Event::dispatch(...)`** (facade), **`::dispatch` / `->dispatch`** on the event class, and **`broadcast(new YourEvent(...))`** (and `broadcast` with the same argument shapes as `event`). Patterns that pass the event through a variable only, or live outside merged scan paths, may still need manual review.
+Scanned PHP is checked for typical dispatch patterns, including **`event(...)`**, **`Event::dispatch(...)`** (facade), **`::dispatch` / `->dispatch`** on the event class, and **`broadcast(new YourEvent(...))`** (same argument shapes as `event`). The analyzer resolves class names **after** the AST pass (so `new YourEvent` under a `use` import matches the event’s FQCN). Patterns that pass the event only through a variable, or live outside merged scan paths, may still need manual review.
+
+### Models analyzer — local query scopes (`scope*`)
+
+For each `scopeSomething` method, Laravel’s public name is **`lcfirst`** the part after `scope` (e.g. `scopeIsInStock` → `isInStock()`). Usage is detected when that **exact** name appears as a **`MethodCall`** (e.g. `$model->isInStock()`, chained `->inStock()`) or as a **`StaticCall`** on the model (`Product::inStock()`). Calls built only from runtime strings (`->{$name}()`) are not seen.
+
+### Services analyzer — what counts as “used”
+
+A service class is treated as referenced if scanned code contains **`new Service`**, **`app(Service::class)`**, **type hints** on parameters, **`Service::method()`** static calls, **`Service::class`**, or **container `bind` / `singleton` / …** concrete targets in `app/Providers` (see `ServiceBindingConcreteVisitor`).
 
 ### `exclude_paths` vs `ignore`
 

@@ -10,6 +10,7 @@ use PhpParser\Node\Expr\ClassConstFetch;
 use PhpParser\Node\Expr\FuncCall;
 use PhpParser\Node\Expr\MethodCall;
 use PhpParser\Node\Expr\New_;
+use PhpParser\Node\Expr\StaticCall;
 use PhpParser\Node\Identifier;
 use PhpParser\Node\Name;
 use PhpParser\Node\Name\FullyQualified;
@@ -60,7 +61,7 @@ class ServicesAnalyzer implements AnalyzerInterface
 
     public function getDescription(): string
     {
-        return 'Finds service classes never constructed, resolved from the container, or bound.';
+        return 'Finds service classes never constructed, resolved from the container, bound, or referenced (e.g. static calls).';
     }
 
     public function analyze(): array
@@ -240,6 +241,19 @@ final class ServiceUsageVisitor extends NodeVisitorAbstract
             return null;
         }
 
+        if ($node instanceof StaticCall && ! $this->shouldSkipStaticClassExpr($node->class)) {
+            $this->markClassFx($node->class);
+
+            return null;
+        }
+
+        if ($node instanceof ClassConstFetch && $node->name instanceof Identifier && strcasecmp($node->name->name, 'class') === 0
+            && ! $this->shouldSkipStaticClassExpr($node->class)) {
+            $this->markClassFx($node->class);
+
+            return null;
+        }
+
         if ($node instanceof FuncCall) {
             $n = $node->name;
             if ($n instanceof Name && $n->getLast() === 'app' && isset($node->args[0])) {
@@ -291,10 +305,22 @@ final class ServiceUsageVisitor extends NodeVisitorAbstract
     private function markClassFx(?Node $class): void
     {
         if ($class instanceof FullyQualified) {
-            $this->mark(strtolower($class->toString()));
+            $this->mark(strtolower(ltrim($class->toString(), '\\')));
         } elseif ($class instanceof Name) {
-            $this->mark(strtolower($class->toString()));
+            $this->mark(strtolower(ltrim($class->toString(), '\\')));
         }
+    }
+
+    /**
+     * Skip self:: / static:: / parent:: — not a concrete class reference.
+     */
+    private function shouldSkipStaticClassExpr(?Node $class): bool
+    {
+        if (! $class instanceof Name) {
+            return false;
+        }
+
+        return in_array(strtolower($class->getLast()), ['self', 'static', 'parent'], true);
     }
 }
 

@@ -1,23 +1,55 @@
 # Laravel Dead Code Detector
 
-Static analysis for Laravel applications. It scans PHP and Blade under configurable roots, combines per-analyzer logic with cross-file signals (including a dependency graph), and reports **possible** unused code: controllers, models, views, named routes, middleware, migrations, jobs, service bindings, and many other Laravel-oriented categories.
+[![Latest Stable Version](https://poser.pugx.org/arafa/laravel-deadcode-detector/v)](https://packagist.org/packages/arafa/laravel-deadcode-detector)
+[![PHP Version Require](https://poser.pugx.org/arafa/laravel-deadcode-detector/require/php)](https://packagist.org/packages/arafa/laravel-deadcode-detector)
+[![License](https://poser.pugx.org/arafa/laravel-deadcode-detector/license)](https://packagist.org/packages/arafa/laravel-deadcode-detector)
 
-**Findings are hints, not proof.** The default terminal view is a short **3-column** table; **`--details`**, **`--output`**, and **JSON** include **reason**, **confidence** (high / medium / low), and **fix suggestions** where applicable. Always use tests, review, and version control before removing anything.
+Static analysis for **Laravel** applications. It walks configurable PHP and Blade roots, runs **domain-specific analyzers**, and shares cross-cutting signals (including a **dependency graph** for controllers, routes, views, jobs, and more). Reports are **hints**, not proof: dynamic frameworks, reflection, stringly-typed references, and code outside the scan scope can produce false positives or lower confidence.
+
+---
+
+## Table of contents
+
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Quick start](#quick-start)
+- [Command: `dead:scan`](#command-deadscan)
+- [How scanning works](#how-scanning-works)
+- [Outputs](#outputs)
+- [Configuration](#configuration)
+- [Built-in analyzers](#built-in-analyzers)
+- [Important heuristics](#important-heuristics)
+- [Reducing noise](#reducing-noise)
+- [Interactive workflow](#interactive-workflow)
+- [JSON export & CI](#json-export--ci)
+- [Custom analyzers](#custom-analyzers)
+- [Architecture](#architecture)
+- [License](#license)
+
+---
+
+## Features
+
+- **Many Laravel-focused categories**: controllers (and unrouted actions), models, Eloquent `scope*`, views/Blade reachability, named routes, middleware, migrations (duplicates / not run), helpers, form requests, API resources, policies, actions, services, Artisan commands, notifications, mailables, validation rules, enums, jobs, events & listeners, observers, container bindings.
+- **Merged scan paths** with optional **auto-discovery** (`app/`, `routes`, `resources`, `config`, `database`, `composer.json` PSR-4 roots, etc.).
+- **Path excludes** (`vendor`, `node_modules`, `storage`, …) plus your **`exclude_paths`** (`fnmatch` supported).
+- **Post-filter** via config **`ignore`** or file-wide **`@deadcode-ignore`** (PHP / Blade).
+- **Console** (compact default table, optional `--details` / `--compact`), **JSON**, and **plain-text** exports.
+- **Optional interactive** pass: review, delete (safeguarded), or inject ignore markers.
+- **Per-analyzer failure isolation**: one broken analyzer does not stop the rest.
 
 ---
 
 ## Requirements
 
-- **PHP:** `^8.0` (`composer.json`).
-- **Illuminate** (`support`, `console`, `contracts`): `^8.0` … `^12.0`.
+| Component | Version |
+|-----------|---------|
+| PHP | `^8.0` |
+| Laravel (`illuminate/support`, `console`, `contracts`) | `^8.0` … `^12.0` |
+| Parser | `nikic/php-parser` `^4.15 \| ^5.0` |
 
-Typical Laravel PHP floors:
-
-| Laravel     | PHP (usual minimum) |
-|-------------|---------------------|
-| 8.x – 9.x   | 8.0+                |
-| 10.x        | 8.1+                |
-| 11.x – 12.x | 8.2+                |
+Typical Laravel minimum PHP versions: **8.0** (Laravel 8–9), **8.1** (10), **8.2+** (11–12).
 
 ---
 
@@ -27,9 +59,9 @@ Typical Laravel PHP floors:
 composer require arafa/laravel-deadcode-detector
 ```
 
-The package registers via Laravel’s auto-discovery (`extra.laravel.providers`).
+The package auto-registers via `extra.laravel.providers`.
 
-Publish the configuration:
+Publish configuration (recommended):
 
 ```bash
 php artisan vendor:publish --tag=deadcode-config
@@ -43,11 +75,13 @@ php artisan vendor:publish --tag=deadcode-config
 php artisan dead:scan
 ```
 
-You get analyzer progress (by default a progress bar at normal verbosity), a **console report** (tables or `--compact` one-liners), a line summarizing **config/inline ignores** when applicable, optional **file export**, and a **closing summary** (including counts by confidence).
+At normal verbosity you get a **progress bar**, per-category **findings tables** (default: **Type · File · Location**), optional lines for **user ignores**, and a **closing summary** (counts by confidence).
 
 ```bash
-php artisan dead:scan -v    # list each analyzer without the progress bar
-php artisan dead:scan -q   # quieter output
+php artisan dead:scan -v          # log each analyzer name (no progress bar)
+php artisan dead:scan -q          # minimal noise
+php artisan dead:scan --details   # wider console table with short “why”
+php artisan dead:scan --compact # one line per finding
 ```
 
 ---
@@ -56,141 +90,184 @@ php artisan dead:scan -q   # quieter output
 
 | Option | Description |
 |--------|-------------|
-| `--format=console` | Human-readable report (default). |
-| `--format=json` | Emit a single JSON document on stdout (do not mix with normal table output). |
-| `--output=path` | Write a report file. If the path ends in `.json`, writes the same structured JSON as `--format=json`. Otherwise writes UTF-8 **plain text** (narrative report; no terminal truncation). |
-| `--only-summary` | With `--output`, skip large console tables (short message + path to the saved report). |
-| `--compact` | One line per finding in the console (`file \| type \| location`). |
-| `--details` | Wider console table: class, method/symbol, modified time, confidence, short “why” (default stays at three columns). |
-| `--interactive` | After the scan summary (**console + interactive TTY only**): for each finding choose **Delete** (double-confirmed; safe paths only), **Ignore** (prepend `// @deadcode-ignore` or Blade `{{-- @deadcode-ignore --}}`), or **Skip** (default). Ignored when `--format=json`. |
-| `-v` / `-vv` | Verbose analyzer output. |
+| `--format=console` | Default: human-readable tables. |
+| `--format=json` | Single JSON document on **stdout** only (do not mix with normal console report). |
+| `--output=path` | Write a file: **`.json`** → same schema as `--format=json`; any other extension → UTF-8 **plain-text** narrative report. |
+| `--only-summary` | With `--output`, skip detailed console listing (short message + path to export). |
+| `--details` | Extra columns in the console (class, method, modified, confidence, short reason). |
+| `--compact` | One line per finding: `file \| type \| location`. |
+| `--interactive` | After the scan (TTY + `console` only): per-finding **Delete** / **Ignore** (inject marker) / **Skip**. |
+| `-v` / `-vv` | Verbose analyzer logging. |
 | `-q` | Quiet. |
 
-The default console layout is **`Type` · `File` · `Location`** so narrow terminals stay readable; the **“safe to delete”** column is not printed in the console (use JSON / export if you need `is_safe_to_delete`).
+**Console UX:** the default layout avoids a **“safe to delete”** column (it wraps badly in narrow terminals). That flag still exists in **JSON** and related APIs for tooling.
+
+**Exit codes:** `dead:scan` currently returns **success (0)** even when findings exist (and even when some analyzers fail, those are listed at the end). For CI gates, **parse JSON** (or grep output) and assert `summary.total_findings === 0` yourself.
 
 ---
 
-## Reports and outputs
+## How scanning works
+
+1. **Global roots** are built by `ScanPathResolver::globalScanPaths()` in order:  
+   **auto-discovery** (if enabled) → **`scan_paths`** → **`paths.extra`** → fallback **`app_path()`** if nothing is configured.
+2. **Per-analyzer roots**: if **`analyzer_paths.{key}`** is set, it defines that analyzer’s primary folders; **global roots are still merged** so references elsewhere in the app stay visible.
+3. **Exclusions**: built-in skips (`vendor`, `node_modules`, `storage`, `bootstrap/cache`, `.git`, …) plus **`exclude_paths`**.
+4. **PHP** is parsed with **nikic/php-parser** on each run (**no AST cache** under `storage`).
+5. **Blade** is scanned for includes/extends/`@include`/`@extends` where applicable; view reachability also uses **`ViewReferenceCollector`** (see [Important heuristics](#important-heuristics)).
+6. Results pass through **`DeadcodeResultIgnoreFilter`** (config + inline markers).
+
+---
+
+## Outputs
 
 ### Console
 
-- **Default:** small table per category — `Type`, `File`, `Location` (class, or `Class::method`). **`--details`** adds class, method, modified time, confidence, and a short “why”. **`--compact`** = one line per finding. Use **`--output=…txt`** for the full plain-text report (why, context, suggested actions). JSON includes every structured field (e.g. `is_safe_to_delete`) for tooling.
-- If `config/deadcode.php` `ignore` or inline `@deadcode-ignore` removed items, a short line reports how many findings were hidden.
+- Default: small table per finding **category** (`Type`, `File`, `Location`).
+- Footer tip points to `--details`, `--output`, `--format=json`.
 
-### JSON (`--format=json` or `--output=…json`)
+### JSON (`schema_version: 1`)
 
-Built by `ReportPayloadBuilder` (`schema_version: 1`):
+Produced by `ReportPayloadBuilder`:
 
 - `generated_at`, `summary` (`total_findings`, `by_type`, `by_confidence`, `confidence_legend`, optional `php_files_in_scope`)
-- `findings`: list of `DeadCodeResult::toArray()` rows
-- `by_type`: the same rows grouped by `type`
+- `findings`: array of `DeadCodeResult::toArray()` rows (includes `fix_suggestions`, `confidence_level`, `is_safe_to_delete`, etc.)
+- `by_type`: grouped copy of findings
 
-Each finding includes `file_path`, `type`, `reason` / `why`, `confidence_level`, `confidence_hint`, class/method/analyzer metadata, `is_safe_to_delete`, and **`fix_suggestions`** (`context_hint` + `actions` with review/delete/ignore text).
+### Plain text (`--output=*.txt`)
 
-### Plain text (`--output=report.txt` / e.g. `storage/app/deadcode-full.txt`)
-
-Structured like JSON in narrative form: **UTF-8** report with spacing, box drawing, and emoji section cues. The boxed “safe to delete” line is omitted there too (redundant with JSON and awkward in narrow editors); use **`--output=…json`** when you need that flag in the export.
+Human-readable boxes and sections. The redundant **“safe to delete”** row is omitted in the box layout; use **JSON** if you need that field in the export file.
 
 ---
 
-## Confidence and false positives
+## Configuration
 
-- **Confidence** = strength of the **static** signal, not “OK to delete.”
-- Dynamic Laravel usage (container resolution, config-driven class names, reflection, code outside scan roots) can lower confidence or trigger “possible dynamic” explanations.
-- Tune noise with **`ignore`** (post-analysis filter), **`@deadcode-ignore`** in the file, or **`exclude_paths`** (skip traversing paths entirely).
+All keys live in **`config/deadcode.php`** (see inline comments there). Summary:
 
-### Events analyzer — what counts as “dispatched”
-
-Scanned PHP is checked for typical dispatch patterns, including **`event(...)`**, **`Event::dispatch(...)`** (facade), **`::dispatch` / `->dispatch`** on the event class, and **`broadcast(new YourEvent(...))`** (same argument shapes as `event`). The analyzer resolves class names **after** the AST pass (so `new YourEvent` under a `use` import matches the event’s FQCN). Patterns that pass the event only through a variable, or live outside merged scan paths, may still need manual review.
-
-### Models analyzer — local query scopes (`scope*`)
-
-For each `scopeSomething` method, Laravel’s public name is **`lcfirst`** the part after `scope` (e.g. `scopeIsInStock` → `isInStock()`). Usage is detected when that **exact** name appears as a **`MethodCall`** (e.g. `$model->isInStock()`, chained `->inStock()`) or as a **`StaticCall`** on the model (`Product::inStock()`). Calls built only from runtime strings (`->{$name}()`) are not seen.
-
-### Services analyzer — what counts as “used”
-
-A service class is treated as referenced if scanned code contains **`new Service`**, **`app(Service::class)`**, **type hints** on parameters, **`Service::method()`** static calls, **`Service::class`**, or **container `bind` / `singleton` / …** concrete targets in `app/Providers` (see `ServiceBindingConcreteVisitor`).
-
-### Views analyzer — what counts as “referenced”
-
-Besides **`view('name')`**, **`View::make`**, **`Route::view($uri, 'name')`**, and Blade chains, PHP scanning includes **`$this->view('name')` / `->view('name', $data)`** on mailables (first argument is the template) and **`new Content(view: 'name')`** (`Illuminate\Mail\Mailables\Content`). **`Route::view`**: if the first argument is a string literal containing **`/`**, the second is the view; if the first argument is not a string literal (dynamic URI) but the second is, the second is treated as the view.
-
-### `exclude_paths` vs `ignore`
-
-| Mechanism | Effect |
-|-----------|--------|
-| `exclude_paths` (+ built-in excludes) | Files under those paths are **not walked**; they are invisible to the graph. |
-| `ignore` (classes / folders / patterns) | Files are still part of analysis; matching **findings are removed** from the report so other items stay accurate. |
-
-PHP files are parsed on each run (no AST cache under `storage`).
+| Key | Purpose |
+|-----|---------|
+| `auto_discover` | `true` (default): discover standard app roots + PSR-4 from `composer.json`. Env: **`DEADCODE_AUTO_DISCOVER`**. |
+| `analyzers` | Map analyzer key → `true`, `false`, or replacement **FQCN** class. |
+| `analyzer_paths` | Override primary directories **per analyzer key**; globals still merge. |
+| `helper_paths` | Extra directories for the **helpers** analyzer. |
+| `paths.extra` | Additional global roots (e.g. modules). |
+| `scan_paths` | Extra global roots (especially when `auto_discover` is off). |
+| `exclude_builtin` | Enable built-in path excludes. Env: **`DEADCODE_EXCLUDE_BUILTIN`**. |
+| `exclude_paths` | Your globs / paths (`fnmatch`). **Files are not traversed** → invisible to graph and analyzers. |
+| `ignore` | **`classes`**, **`folders`**, **`patterns`** — remove matching **findings** after analysis (files still analyzed for others). |
+| `custom_analyzers` | List of `AnalyzerInterface` FQCNs. |
 
 ---
 
-## Inline ignore (file-wide)
+## Built-in analyzers
 
-Recognized in sources (see `DeadcodeResultIgnoreFilter`):
+| Key | What it looks for |
+|-----|-------------------|
+| `controllers` | Unused controller classes; public actions not bound in routes. |
+| `models` | Unused Eloquent models; unused local **`scope*`** methods. |
+| `views` | Blade files never reached from PHP/Blade graph. |
+| `routes` | Named routes never referenced (`route()`, `@route`, etc.). |
+| `middlewares` | Middleware not registered / applied in scanned routes & kernel. |
+| `migrations` | Duplicate `Schema::create` table names; migrations not recorded as run. |
+| `helpers` | Functions in autoloaded helper files never called. |
+| `requests` | `FormRequest` never type-hinted on actions / route callables. |
+| `resources` | `JsonResource` / `ResourceCollection` never constructed. |
+| `policies` | Policies not registered / referenced in scanned code. |
+| `actions` | Action-style classes never executed. |
+| `services` | Service-like classes never `new` / DI / `app()` / `::class` / **static calls** / bindings. |
+| `commands` | Artisan `Command` subclasses not registered in kernel / `withCommands()`. |
+| `notifications` | Notifications never sent in scanned code. |
+| `mailables` | Mailables never queued/sent via `Mail` in scanned code. |
+| `rules` | Custom `Rule` classes never instantiated. |
+| `enums` | PHP enums never referenced. |
+| `jobs` | Queueable jobs never dispatched (graph + patterns). |
+| `events` | Event classes never dispatched / listed in `EventServiceProvider` `$listen` keys. |
+| `listeners` | Listeners not listed in `$listen`. |
+| `observers` | Observers under conventions not registered via `Model::observe()` etc. |
+| `service_bindings` | Dubious container bindings / abstractions never resolved. |
 
-- **PHP:** `// @deadcode-ignore` or `# …`, or the tag inside a block/doc comment near the top.
-- **Blade:** `{{-- @deadcode-ignore --}}`
-
-Applies to the **whole file** for reporting. Optional **interactive “Ignore”** uses `DeadcodeInlineIgnoreMarker` to insert this for `.php` / `.blade.php`.
+Disable any key with `false` in `analyzers`.
 
 ---
 
-## Configuration highlights (`config/deadcode.php`)
+## Important heuristics
 
-| Key | Role |
-|-----|------|
-| `auto_discover` | Discover `app/`, children of `app`, `routes`, `bootstrap`, `resources`, `config`, `database`, optional `src/`, and PSR-4 paths from `composer.json`. |
-| `analyzers` | Toggle built-ins or set a replacement **FQCN** per key. |
-| `analyzer_paths` | Override/extend scan roots **per analyzer** (global roots still merge in). |
-| `helper_paths` | Extra roots for helpers. |
-| `paths.extra` / `scan_paths` | Additional global roots. |
-| `exclude_builtin` / `exclude_paths` | Path pruning (`fnmatch` supported on user entries). |
-| `ignore` | `classes`, `folders`, `patterns` — strip findings after analysis. |
-| `custom_analyzers` | Extra `AnalyzerInterface` classes. |
+These details explain common **false positives** and what is intentionally detected.
 
-Full behavior is documented in the published config file comments.
+### Events
+
+Counts dispatch when scanned code uses **`event(...)`**, **`Event::dispatch(...)`**, **`::dispatch` / `->dispatch`** on the event class, and **`broadcast(new YourEvent(...))`** (same shapes as `event`). Class names are resolved **after** the AST pass so `use`-imported `new YourEvent` matches the event FQCN. Events passed only through **variables** or built outside scan paths may still look “unused”.
+
+### Models — `scope*`
+
+Laravel’s public name for `scopeFooBar` is **`lcfirst`** of the suffix after `scope`. Usage is detected for **`MethodCall`** with that name (e.g. `$model->isInStock()`, chained `->inStock()`) and **`StaticCall`** on the model (`Product::inStock()`). Dynamic **`$model->{$name}()`** is not resolved statically.
+
+### Services
+
+A service candidate is “used” if scanned code has **`new`**, **`app(Class::class)`**, **parameter type hints**, **`Class::method()`**, **`Class::class`**, or the class appears as a **concrete** in `bind` / `singleton` / `scoped` / `instance` in scanned **`app/Providers`**.
+
+### Views
+
+Beyond **`view()`**, **`View::make`**, **`Route::view`**, Inertia helpers, and Blade chains, PHP scanning includes **mailable `->view('name')` / `->view('name', $data)`** (first argument = template) and **`new Content(view: 'name')`** (`Illuminate\Mail\Mailables\Content`). **`Route::view`**: if the first argument is a string containing **`/`**, the second is the view; if the first is not a string literal but the second is, the second is treated as the view (dynamic URI).
+
+### Confidence
+
+**High / medium / low** describe how strong the **static** signal is—not “safe to delete.” Some finding types may attach **`possible_dynamic_hint`** when names or paths are only partially known.
 
 ---
 
-## Built-in analyzer keys
+## Reducing noise
 
-`controllers`, `models`, `views`, `routes`, `middlewares`, `migrations`, `helpers`, `requests`, `resources`, `policies`, `actions`, `services`, `commands`, `notifications`, `mailables`, `rules`, `enums`, `jobs`, `events`, `listeners`, `observers`, `service_bindings`.
+| Tool | Effect |
+|------|--------|
+| **`exclude_paths`** | Do not walk those paths → files **missing** from graph and analyzers. |
+| **`ignore` (`classes` / `folders` / `patterns`)** | Strip matching **findings** only; other rules still see the files. |
+| **Inline `// @deadcode-ignore`** or **`# …`** (PHP) / **`{{-- @deadcode-ignore --}}`** (Blade) | File-wide suppression for reporting. |
+
+Prefer **`ignore`** over **`exclude_paths`** when the file should still participate in reference resolution for the rest of the app.
+
+---
+
+## Interactive workflow
+
+With **`--interactive`** (console + TTY):
+
+- **Delete**: only under `base_path()`, not under `vendor`, `node_modules`, `storage`, `bootstrap/cache`, `.git`; double confirmation; not offered for shared artifacts like pure **route** / **binding** rows when unsafe.
+- **Ignore**: prepends the standard marker for writable `.php` / `.blade.php`.
+- **Skip**: no change.
+
+---
+
+## JSON export & CI
+
+```bash
+php artisan dead:scan --format=json > deadcode-report.json
+# or
+php artisan dead:scan --output=storage/app/deadcode-report.json
+```
+
+Inspect `summary.total_findings` and `findings[]` in your pipeline. Remember the **exit code stays 0** unless you add your own wrapper script.
 
 ---
 
 ## Custom analyzers
 
-Implement `Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface`: `getName()`, `getDescription()`, `analyze()` returning a list of `DeadCodeResult` (typically `DeadCodeResult::fromArray([...])` with optional `reason`, `confidenceLevel`, `isSafeToDelete`, `possibleDynamicHint`, etc.).
+Implement `Arafa\DeadcodeDetector\Analyzers\Contracts\AnalyzerInterface` (`getName()`, `getDescription()`, `analyze()` returning `DeadCodeResult[]`). Register FQCNs in **`custom_analyzers`**. The service provider binds **`PhpFileScanner`**, merged scan paths, and **`PathExcludeMatcher`**.
 
-Register under `custom_analyzers`. The provider injects `PhpFileScanner`, merged paths, and `PathExcludeMatcher`.
-
----
-
-## Interactive cleanup
-
-- **Delete:** Not offered for types tied to **shared files** (`route`, `binding`). Otherwise only files **under `base_path()`**, not under `vendor`, `node_modules`, `storage`, `bootstrap/cache`, or `.git`, with **two** `no`-default confirmations before `unlink`. Extra warning when the finding may refer to only part of a file (`controller_method`, `model_scope`, `helper`).
-- **Ignore:** Prepends the standard marker when the file is writable `.php` / `.blade.php`.
-- **Skip:** No changes.
-
-Requires an interactive terminal (`InputInterface::isInteractive()`).
+You can also replace a built-in by setting `analyzers.{key}` to your class FQCN.
 
 ---
 
-## Architecture (overview)
+## Architecture
 
-| Piece | Responsibility |
-|-------|------------------|
-| `DeadScanCommand` | Runs analyzers, applies user ignore filter, writes exports, reporters, optional interactive workflow. |
-| `Analyzers/*` | Per-domain dead/unused detection. |
-| `Support/DependencyGraphEngine`, `ProjectPhpIterator`, `PathExcludeMatcher`, `PhpAstParser` | Graph, iteration, on-demand PHP parse (no AST cache). |
-| `DeadcodeResultIgnoreFilter`, `DeadcodeInlineIgnoreMarker` | Config/inline suppression and interactive marker insertion. |
-| `InteractiveDeadcodeWorkflow` | Delete / ignore / skip prompts. |
-| `ReportPayloadBuilder`, `PlainTextReportWriter`, `ConsoleReporter`, `JsonReporter` | Outputs. |
-| `DeadCodeResult`, `FindingFixSuggestion`, `DetectionConfidence` | Finding model, export shape, suggestions, confidence. |
-
-One failed analyzer does not stop the rest; failures are summarized at the end of the command.
+| Area | Role |
+|------|------|
+| `DeadScanCommand` | Orchestrates analyzers, ignore filter, reporters, exports, interactive mode. |
+| `Analyzers/*` | Per-domain detection implementing `AnalyzerInterface`. |
+| `Support/DependencyGraphEngine`, `ProjectPhpIterator`, `PathExcludeMatcher`, `PhpAstParser` | Graph, filesystem iteration, exclusions, parse-on-demand. |
+| `Support/ViewReferenceCollector` | View/Inertia/Mailable view name extraction for the graph. |
+| `DeadcodeResultIgnoreFilter`, `DeadcodeInlineIgnoreMarker` | Config + inline suppression; marker insertion. |
+| `ReportPayloadBuilder`, `PlainTextReportWriter`, `ConsoleReporter`, `JsonReporter` | Output channels. |
+| `DeadCodeResult`, `DetectionConfidence`, `FindingFixSuggestion` | Finding model and UX metadata. |
 
 ---
 

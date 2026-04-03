@@ -335,7 +335,7 @@ class ModelsAnalyzer implements AnalyzerInterface
     }
 
     /**
-     * @return list<string> Camel scope name without "scope" prefix (e.g. published for scopePublished)
+     * @return list<string> Laravel public scope names: scopeFooBar → fooBar (lcfirst after "scope")
      */
     private function extractScopeMethodNames(SplFileInfo $file): array
     {
@@ -359,9 +359,13 @@ class ModelsAnalyzer implements AnalyzerInterface
     }
 
     /**
+     * $scopePublicName comes from the model file (scopeX → lcfirst(X)); that is the only name
+     * Laravel exposes on the builder. We search for that identifier on instance/chain calls
+     * (MethodCall) or on static calls to this model (StaticCall).
+     *
      * @param array<string, true> $modelPaths
      */
-    private function isScopeUsedElsewhere(string $modelFqcn, string $scopeCamel, array $modelPaths): bool
+    private function isScopeUsedElsewhere(string $modelFqcn, string $scopePublicName, array $modelPaths): bool
     {
         $targetNorm = $this->normalizeFqcn($modelFqcn);
 
@@ -371,7 +375,7 @@ class ModelsAnalyzer implements AnalyzerInterface
                 continue;
             }
 
-            $visitor = new ModelScopeStaticCallVisitor($targetNorm, $scopeCamel);
+            $visitor = new ModelScopeUsageVisitor($targetNorm, $scopePublicName);
             $traverser = new NodeTraverser();
             $traverser->addVisitor(new NameResolver());
             $traverser->addVisitor($visitor);
@@ -558,12 +562,15 @@ final class ModelScopeMethodsVisitor extends NodeVisitorAbstract
     }
 }
 
-/** Detects Model::scopeName() static calls after NameResolver. */
-final class ModelScopeStaticCallVisitor extends NodeVisitorAbstract
+/**
+ * Detects scope usage: name is whatever Laravel derives from scope* in the model file;
+ * match MethodCall (e.g. $model->foo(), $q->foo()) or StaticCall on this model (Product::foo()).
+ */
+final class ModelScopeUsageVisitor extends NodeVisitorAbstract
 {
     public function __construct(
         private readonly string $modelFqcnNormalized,
-        private readonly string $scopeCamel,
+        private readonly string $scopePublicName,
     ) {}
 
     private bool $found = false;
@@ -573,9 +580,24 @@ final class ModelScopeStaticCallVisitor extends NodeVisitorAbstract
         return $this->found;
     }
 
+    private function nameMatchesScope(Identifier $name): bool
+    {
+        return strcasecmp($name->name, $this->scopePublicName) === 0;
+    }
+
     public function enterNode(Node $node): ?int
     {
-        if (! $node instanceof StaticCall) {
+        if ($node instanceof MethodCall && $node->name instanceof Identifier && $this->nameMatchesScope($node->name)) {
+            $this->found = true;
+
+            return NodeVisitor::STOP_TRAVERSAL;
+        }
+
+        if (! $node instanceof StaticCall || ! $node->name instanceof Identifier) {
+            return null;
+        }
+
+        if (! $this->nameMatchesScope($node->name)) {
             return null;
         }
 
@@ -591,17 +613,9 @@ final class ModelScopeStaticCallVisitor extends NodeVisitorAbstract
             return null;
         }
 
-        if (! $node->name instanceof Identifier) {
-            return null;
-        }
+        $this->found = true;
 
-        if (strcasecmp($node->name->name, $this->scopeCamel) === 0) {
-            $this->found = true;
-
-            return NodeVisitor::STOP_TRAVERSAL;
-        }
-
-        return null;
+        return NodeVisitor::STOP_TRAVERSAL;
     }
 }
 

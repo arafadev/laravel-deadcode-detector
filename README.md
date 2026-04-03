@@ -86,9 +86,9 @@ Built by `ReportPayloadBuilder` (`schema_version: 1`):
 
 Each finding includes `file_path`, `type`, `reason` / `why`, `confidence_level`, `confidence_hint`, class/method/analyzer metadata, `is_safe_to_delete`, and **`fix_suggestions`** (`context_hint` + `actions` with review/delete/ignore text).
 
-### Plain text (`--output=report.txt`)
+### Plain text (`--output=report.txt` / e.g. `storage/app/deadcode-full.txt`)
 
-Same information as JSON in a readable, non-truncated textual form.
+Same fields as JSON in a **UTF-8** report with spacing, box drawing, and emoji section cues (easy to skim in an editor).
 
 ---
 

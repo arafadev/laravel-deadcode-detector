@@ -8,6 +8,7 @@ use Illuminate\Support\ServiceProvider;
 use Arafa\DeadcodeDetector\Analyzers\ActionsAnalyzer;
 use Arafa\DeadcodeDetector\Analyzers\CommandsAnalyzer;
 use Arafa\DeadcodeDetector\Analyzers\ControllersAnalyzer;
+use Arafa\DeadcodeDetector\Analyzers\DebugStatementsAnalyzer;
 use Arafa\DeadcodeDetector\Analyzers\EnumsAnalyzer;
 use Arafa\DeadcodeDetector\Analyzers\EventsAnalyzer;
 use Arafa\DeadcodeDetector\Analyzers\HelpersAnalyzer;
@@ -58,6 +59,7 @@ class DeadCodeServiceProvider extends ServiceProvider
         'listeners'         => ListenersAnalyzer::class,
         'observers'         => ObserversAnalyzer::class,
         'service_bindings'  => ServiceBindingsAnalyzer::class,
+        'debug_statements'  => DebugStatementsAnalyzer::class,
     ];
 
     public array $commands = [DeadScanCommand::class];

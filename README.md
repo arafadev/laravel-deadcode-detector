@@ -184,6 +184,7 @@ All keys live in **`config/deadcode.php`** (see inline comments there). Summary:
 | `listeners` | Listeners not listed in `$listen`. |
 | `observers` | Observers under conventions not registered via `Model::observe()` etc. |
 | `service_bindings` | Dubious container bindings / abstractions never resolved. |
+| `debug_statement` | Discover debug statements inside `*.php`  or `*.blade.php` files |
 
 Disable any key with `false` in `analyzers`.
 

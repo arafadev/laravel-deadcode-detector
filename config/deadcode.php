@@ -46,6 +46,7 @@ return [
         'listeners'         => true,
         'observers'         => true,
         'service_bindings'  => true,
+        'debug_statements'  => true,
     ],
 
     /*
@@ -80,6 +81,17 @@ return [
     ],
 
     'helper_paths' => [],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Debug Functions Detection
+    |--------------------------------------------------------------------------
+    | The functions/methods that DebugStatementsAnalyzer will look for.
+    | Feel free to add custom logger functions or disable the ones you use normally.
+    */
+    'debug_functions' => [
+        'dd', 'dump', 'ddd', 'ray', 'var_dump', 'print_r', 'console_log',
+    ],
 
     'custom_analyzers' => [],
 

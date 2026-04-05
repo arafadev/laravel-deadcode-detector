@@ -56,6 +56,7 @@ class DeadScanCommand extends Command
         'listeners'         => \Arafa\DeadcodeDetector\Analyzers\ListenersAnalyzer::class,
         'observers'         => \Arafa\DeadcodeDetector\Analyzers\ObserversAnalyzer::class,
         'service_bindings'  => \Arafa\DeadcodeDetector\Analyzers\ServiceBindingsAnalyzer::class,
+        'debug_statements'  => \Arafa\DeadcodeDetector\Analyzers\DebugStatementsAnalyzer::class,
     ];
 
     public function __construct(private readonly Container $container)
